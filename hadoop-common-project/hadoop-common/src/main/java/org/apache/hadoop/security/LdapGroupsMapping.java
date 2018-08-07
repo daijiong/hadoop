@@ -41,12 +41,12 @@ import javax.naming.directory.SearchResult;
 import javax.naming.ldap.LdapName;
 import javax.naming.ldap.Rdn;
 
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.classification.InterfaceAudience;
 import org.apache.hadoop.classification.InterfaceStability;
 import org.apache.hadoop.conf.Configurable;
 import org.apache.hadoop.conf.Configuration;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /**
  * An implementation of {@link GroupMappingServiceProvider} which
@@ -109,6 +109,27 @@ public class LdapGroupsMapping
   public static final String LDAP_KEYSTORE_PASSWORD_FILE_KEY = LDAP_KEYSTORE_PASSWORD_KEY + ".file";
   public static final String LDAP_KEYSTORE_PASSWORD_FILE_DEFAULT = "";
 
+
+  /**
+   * File path to the location of the SSL truststore to use
+   */
+  public static final String LDAP_TRUSTSTORE_KEY = LDAP_CONFIG_PREFIX +
+      ".ssl.truststore";
+
+  /**
+   * The key of the credential entry containing the password for
+   * the LDAP SSL truststore
+   */
+  public static final String LDAP_TRUSTSTORE_PASSWORD_KEY =
+      LDAP_CONFIG_PREFIX +".ssl.truststore.password";
+
+  /**
+   * The path to a file containing the password for
+   * the LDAP SSL truststore
+   */
+  public static final String LDAP_TRUSTSTORE_PASSWORD_FILE_KEY =
+      LDAP_TRUSTSTORE_PASSWORD_KEY + ".file";
+
   /*
    * User to bind to the LDAP server with
    */
@@ -129,6 +150,19 @@ public class LdapGroupsMapping
    */
   public static final String BASE_DN_KEY = LDAP_CONFIG_PREFIX + ".base";
   public static final String BASE_DN_DEFAULT = "";
+
+  /*
+   * Base DN used in user search.
+   */
+  public static final String USER_BASE_DN_KEY =
+          LDAP_CONFIG_PREFIX + ".userbase";
+
+  /*
+   * Base DN used in group search.
+   */
+  public static final String GROUP_BASE_DN_KEY =
+          LDAP_CONFIG_PREFIX + ".groupbase";
+
 
   /*
    * Any additional filters to apply when searching for users
@@ -198,9 +232,10 @@ public class LdapGroupsMapping
       LDAP_CONFIG_PREFIX + ".read.timeout.ms";
   public static final int READ_TIMEOUT_DEFAULT = 60 * 1000; // 60 seconds
 
-  private static final Log LOG = LogFactory.getLog(LdapGroupsMapping.class);
+  private static final Logger LOG =
+      LoggerFactory.getLogger(LdapGroupsMapping.class);
 
-  private static final SearchControls SEARCH_CONTROLS = new SearchControls();
+  static final SearchControls SEARCH_CONTROLS = new SearchControls();
   static {
     SEARCH_CONTROLS.setSearchScope(SearchControls.SUBTREE_SCOPE);
   }
@@ -212,9 +247,12 @@ public class LdapGroupsMapping
   private boolean useSsl;
   private String keystore;
   private String keystorePass;
+  private String truststore;
+  private String truststorePass;
   private String bindUser;
   private String bindPassword;
-  private String baseDN;
+  private String userbaseDN;
+  private String groupbaseDN;
   private String groupSearchFilter;
   private String userSearchFilter;
   private String memberOfAttr;
@@ -315,7 +353,7 @@ public class LdapGroupsMapping
       uidNumber = uidAttribute.get().toString();
     }
     if (uidNumber != null && gidNumber != null) {
-      return c.search(baseDN,
+      return c.search(groupbaseDN,
               "(&"+ groupSearchFilter + "(|(" + posixGidAttr + "={0})" +
                   "(" + groupMemberAttr + "={1})))",
               new Object[] {gidNumber, uidNumber},
@@ -350,7 +388,7 @@ public class LdapGroupsMapping
     } else {
       String userDn = result.getNameInNamespace();
       groupResults =
-          c.search(baseDN,
+          c.search(groupbaseDN,
               "(&" + groupSearchFilter + "(" + groupMemberAttr + "={0}))",
               new Object[]{userDn},
               SEARCH_CONTROLS);
@@ -391,7 +429,7 @@ public class LdapGroupsMapping
     DirContext c = getDirContext();
 
     // Search for the user. We'll only ever need to look at the first result
-    NamingEnumeration<SearchResult> results = c.search(baseDN,
+    NamingEnumeration<SearchResult> results = c.search(userbaseDN,
         userSearchFilter, new Object[]{user}, SEARCH_CONTROLS);
     // return empty list if the user can not be found.
     if (!results.hasMoreElements()) {
@@ -489,7 +527,7 @@ public class LdapGroupsMapping
     filter.append("))");
     LOG.debug("Ldap group query string: " + filter.toString());
     NamingEnumeration<SearchResult> groupResults =
-        context.search(baseDN,
+        context.search(groupbaseDN,
            filter.toString(),
            SEARCH_CONTROLS);
     while (groupResults.hasMoreElements()) {
@@ -511,8 +549,19 @@ public class LdapGroupsMapping
       // Set up SSL security, if necessary
       if (useSsl) {
         env.put(Context.SECURITY_PROTOCOL, "ssl");
-        System.setProperty("javax.net.ssl.keyStore", keystore);
-        System.setProperty("javax.net.ssl.keyStorePassword", keystorePass);
+        if (!keystore.isEmpty()) {
+          System.setProperty("javax.net.ssl.keyStore", keystore);
+        }
+        if (!keystorePass.isEmpty()) {
+          System.setProperty("javax.net.ssl.keyStorePassword", keystorePass);
+        }
+        if (!truststore.isEmpty()) {
+          System.setProperty("javax.net.ssl.trustStore", truststore);
+        }
+        if (!truststorePass.isEmpty()) {
+          System.setProperty("javax.net.ssl.trustStorePassword",
+              truststorePass);
+        }
       }
 
       env.put(Context.SECURITY_PRINCIPAL, bindUser);
@@ -557,15 +606,10 @@ public class LdapGroupsMapping
     if (ldapUrl == null || ldapUrl.isEmpty()) {
       throw new RuntimeException("LDAP URL is not configured");
     }
-    
+
     useSsl = conf.getBoolean(LDAP_USE_SSL_KEY, LDAP_USE_SSL_DEFAULT);
-    keystore = conf.get(LDAP_KEYSTORE_KEY, LDAP_KEYSTORE_DEFAULT);
-    
-    keystorePass = getPassword(conf, LDAP_KEYSTORE_PASSWORD_KEY,
-        LDAP_KEYSTORE_PASSWORD_DEFAULT);
-    if (keystorePass.isEmpty()) {
-      keystorePass = extractPassword(conf.get(LDAP_KEYSTORE_PASSWORD_FILE_KEY,
-          LDAP_KEYSTORE_PASSWORD_FILE_DEFAULT));
+    if (useSsl) {
+      loadSslConf(conf);
     }
     
     bindUser = conf.get(BIND_USER_KEY, BIND_USER_DEFAULT);
@@ -575,7 +619,20 @@ public class LdapGroupsMapping
           conf.get(BIND_PASSWORD_FILE_KEY, BIND_PASSWORD_FILE_DEFAULT));
     }
     
-    baseDN = conf.get(BASE_DN_KEY, BASE_DN_DEFAULT);
+    String baseDN = conf.getTrimmed(BASE_DN_KEY, BASE_DN_DEFAULT);
+
+    //User search base which defaults to base dn.
+    userbaseDN = conf.getTrimmed(USER_BASE_DN_KEY, baseDN);
+    if (LOG.isDebugEnabled()) {
+      LOG.debug("Usersearch baseDN: " + userbaseDN);
+    }
+
+    //Group search base which defaults to base dn.
+    groupbaseDN = conf.getTrimmed(GROUP_BASE_DN_KEY, baseDN);
+    if (LOG.isDebugEnabled()) {
+      LOG.debug("Groupsearch baseDN: " + userbaseDN);
+    }
+
     groupSearchFilter =
         conf.get(GROUP_SEARCH_FILTER_KEY, GROUP_SEARCH_FILTER_DEFAULT);
     userSearchFilter =
@@ -615,6 +672,47 @@ public class LdapGroupsMapping
     this.conf = conf;
   }
 
+  private void loadSslConf(Configuration sslConf) {
+    keystore = sslConf.get(LDAP_KEYSTORE_KEY, LDAP_KEYSTORE_DEFAULT);
+    keystorePass = getPassword(sslConf, LDAP_KEYSTORE_PASSWORD_KEY,
+        LDAP_KEYSTORE_PASSWORD_DEFAULT);
+    if (keystorePass.isEmpty()) {
+      keystorePass = extractPassword(sslConf.get(
+          LDAP_KEYSTORE_PASSWORD_FILE_KEY,
+          LDAP_KEYSTORE_PASSWORD_FILE_DEFAULT));
+    }
+
+    truststore = sslConf.get(LDAP_TRUSTSTORE_KEY, "");
+    truststorePass = getPasswordFromCredentialProviders(
+        sslConf, LDAP_TRUSTSTORE_PASSWORD_KEY, "");
+    if (truststorePass.isEmpty()) {
+      truststorePass = extractPassword(
+          sslConf.get(LDAP_TRUSTSTORE_PASSWORD_FILE_KEY, ""));
+    }
+  }
+
+  String getPasswordFromCredentialProviders(
+      Configuration conf, String alias, String defaultPass) {
+    String password = defaultPass;
+    try {
+      char[] passchars = conf.getPasswordFromCredentialProviders(alias);
+      if (passchars != null) {
+        password = new String(passchars);
+      }
+    } catch (IOException ioe) {
+      LOG.warn("Exception while trying to get password for alias {}: {}",
+          alias, ioe);
+    }
+    return password;
+  }
+
+  /**
+   * Passwords should not be stored in configuration. Use
+   * {@link #getPasswordFromCredentialProviders(
+   *            Configuration, String, String)}
+   * to avoid reading passwords from a configuration file.
+   */
+  @Deprecated
   String getPassword(Configuration conf, String alias, String defaultPass) {
     String password = defaultPass;
     try {

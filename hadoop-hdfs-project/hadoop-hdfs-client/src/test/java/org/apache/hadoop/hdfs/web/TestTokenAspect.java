@@ -34,7 +34,6 @@ import static org.mockito.Mockito.spy;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 
-import java.io.FileNotFoundException;
 import java.io.IOException;
 import java.net.URI;
 import java.net.URISyntaxException;
@@ -53,10 +52,10 @@ import org.apache.hadoop.security.SecurityUtil;
 import org.apache.hadoop.security.UserGroupInformation;
 import org.apache.hadoop.security.token.Token;
 import org.apache.hadoop.security.token.TokenIdentifier;
+import org.apache.hadoop.test.Whitebox;
 import org.apache.hadoop.util.Progressable;
 import org.junit.Test;
 import org.mockito.Mockito;
-import org.mockito.internal.util.reflection.Whitebox;
 
 public class TestTokenAspect {
 
@@ -130,9 +129,8 @@ public class TestTokenAspect {
     }
 
     @Override
-    public FileStatus[] listStatus(Path f) throws FileNotFoundException,
-        IOException {
-      return null;
+    public FileStatus[] listStatus(Path f) throws IOException {
+      return new FileStatus[0];
     }
 
     @Override

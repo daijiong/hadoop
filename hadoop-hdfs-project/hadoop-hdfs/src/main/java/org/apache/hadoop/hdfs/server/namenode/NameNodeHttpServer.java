@@ -41,6 +41,7 @@ import org.apache.hadoop.hdfs.server.namenode.startupprogress.StartupProgress;
 import org.apache.hadoop.hdfs.server.namenode.web.resources.NamenodeWebHdfsMethods;
 import org.apache.hadoop.hdfs.web.AuthFilter;
 import org.apache.hadoop.hdfs.web.WebHdfsFileSystem;
+import org.apache.hadoop.hdfs.web.resources.AclPermissionParam;
 import org.apache.hadoop.hdfs.web.resources.Param;
 import org.apache.hadoop.hdfs.web.resources.UserParam;
 import org.apache.hadoop.http.HttpConfig;
@@ -75,11 +76,16 @@ public class NameNodeHttpServer {
     this.bindAddress = bindAddress;
   }
 
-  private void initWebHdfs(Configuration conf) throws IOException {
+  public static void initWebHdfs(Configuration conf, String hostname,
+      HttpServer2 httpServer2, String jerseyResourcePackage)
+      throws IOException {
     // set user pattern based on configuration file
     UserParam.setUserPattern(conf.get(
         HdfsClientConfigKeys.DFS_WEBHDFS_USER_PATTERN_KEY,
         HdfsClientConfigKeys.DFS_WEBHDFS_USER_PATTERN_DEFAULT));
+    AclPermissionParam.setAclPermissionPattern(conf.get(
+        HdfsClientConfigKeys.DFS_WEBHDFS_ACL_PERMISSION_PATTERN_KEY,
+        HdfsClientConfigKeys.DFS_WEBHDFS_ACL_PERMISSION_PATTERN_DEFAULT));
 
     // add authentication filter for webhdfs
     final String className = conf.get(
@@ -88,8 +94,8 @@ public class NameNodeHttpServer {
     final String name = className;
 
     final String pathSpec = WebHdfsFileSystem.PATH_PREFIX + "/*";
-    Map<String, String> params = getAuthFilterParams(conf);
-    HttpServer2.defineFilter(httpServer.getWebAppContext(), name, className,
+    Map<String, String> params = getAuthFilterParams(conf, hostname);
+    HttpServer2.defineFilter(httpServer2.getWebAppContext(), name, className,
         params, new String[] { pathSpec });
     HttpServer2.LOG.info("Added filter '" + name + "' (class=" + className
         + ")");
@@ -100,13 +106,14 @@ public class NameNodeHttpServer {
       Map<String, String> restCsrfParams = RestCsrfPreventionFilter
           .getFilterParams(conf, "dfs.webhdfs.rest-csrf.");
       String restCsrfClassName = RestCsrfPreventionFilter.class.getName();
-      HttpServer2.defineFilter(httpServer.getWebAppContext(), restCsrfClassName,
-          restCsrfClassName, restCsrfParams, new String[] {pathSpec});
+      HttpServer2.defineFilter(httpServer2.getWebAppContext(),
+          restCsrfClassName, restCsrfClassName, restCsrfParams,
+          new String[] {pathSpec});
     }
 
     // add webhdfs packages
-    httpServer.addJerseyResourcePackage(NamenodeWebHdfsMethods.class
-        .getPackage().getName() + ";" + Param.class.getPackage().getName(),
+    httpServer2.addJerseyResourcePackage(
+        jerseyResourcePackage + ";" + Param.class.getPackage().getName(),
         pathSpec);
   }
 
@@ -161,7 +168,8 @@ public class NameNodeHttpServer {
           datanodeSslPort.getPort());
     }
 
-    initWebHdfs(conf);
+    initWebHdfs(conf, bindAddress.getHostName(), httpServer,
+        NamenodeWebHdfsMethods.class.getPackage().getName());
 
     httpServer.setAttribute(NAMENODE_ATTRIBUTE_KEY, nn);
     httpServer.setAttribute(JspHelper.CURRENT_CONF, conf);
@@ -182,8 +190,8 @@ public class NameNodeHttpServer {
     }
   }
   
-  private Map<String, String> getAuthFilterParams(Configuration conf)
-      throws IOException {
+  private static Map<String, String> getAuthFilterParams(Configuration conf,
+      String hostname) throws IOException {
     Map<String, String> params = new HashMap<String, String>();
     // Select configs beginning with 'dfs.web.authentication.'
     Iterator<Map.Entry<String, String>> iterator = conf.iterator();
@@ -199,8 +207,7 @@ public class NameNodeHttpServer {
       params
           .put(
               DFSConfigKeys.DFS_WEB_AUTHENTICATION_KERBEROS_PRINCIPAL_KEY,
-              SecurityUtil.getServerPrincipal(principalInConf,
-                                              bindAddress.getHostName()));
+              SecurityUtil.getServerPrincipal(principalInConf, hostname));
     } else if (UserGroupInformation.isSecurityEnabled()) {
       HttpServer2.LOG.error(
           "WebHDFS and security are enabled, but configuration property '" +

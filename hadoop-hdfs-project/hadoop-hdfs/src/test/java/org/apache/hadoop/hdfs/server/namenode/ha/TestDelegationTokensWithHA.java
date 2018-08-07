@@ -43,10 +43,10 @@ import org.apache.hadoop.security.UserGroupInformation;
 import org.apache.hadoop.security.token.Token;
 import org.apache.hadoop.security.token.TokenIdentifier;
 import org.apache.hadoop.test.GenericTestUtils;
+import org.apache.hadoop.test.Whitebox;
 import org.junit.After;
 import org.junit.Before;
 import org.junit.Test;
-import org.mockito.internal.util.reflection.Whitebox;
 
 import java.io.ByteArrayInputStream;
 import java.io.DataInputStream;
@@ -292,7 +292,7 @@ public class TestDelegationTokensWithHA {
       nn0.getNameNodeAddress().getPort()));
     nnAddrs.add(new InetSocketAddress("localhost",
       nn1.getNameNodeAddress().getPort()));
-    HAUtil.cloneDelegationTokenForLogicalUri(ugi, haUri, nnAddrs);
+    HAUtilClient.cloneDelegationTokenForLogicalUri(ugi, haUri, nnAddrs);
     
     Collection<Token<? extends TokenIdentifier>> tokens = ugi.getTokens();
     assertEquals(3, tokens.size());
@@ -321,7 +321,7 @@ public class TestDelegationTokensWithHA {
     }
     
     // reclone the tokens, and see if they match now
-    HAUtil.cloneDelegationTokenForLogicalUri(ugi, haUri, nnAddrs);
+    HAUtilClient.cloneDelegationTokenForLogicalUri(ugi, haUri, nnAddrs);
     for (InetSocketAddress addr : nnAddrs) {
       Text ipcDtService = SecurityUtil.buildTokenService(addr);
       Token<DelegationTokenIdentifier> token2 =

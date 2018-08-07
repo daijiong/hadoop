@@ -18,6 +18,7 @@
  */
 package org.apache.hadoop.hdfs.server.datanode;
 
+import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.Preconditions;
 import org.apache.commons.codec.digest.DigestUtils;
 import org.apache.hadoop.classification.InterfaceAudience;
@@ -77,7 +78,8 @@ import static java.util.concurrent.TimeUnit.SECONDS;
 @InterfaceAudience.Private
 public class DiskBalancer {
 
-  private static final Logger LOG = LoggerFactory.getLogger(DiskBalancer
+  @VisibleForTesting
+  public static final Logger LOG = LoggerFactory.getLogger(DiskBalancer
       .class);
   private final FsDatasetSpi<?> dataset;
   private final String dataNodeUUID;
@@ -91,6 +93,8 @@ public class DiskBalancer {
   private String planFile;
   private DiskBalancerWorkStatus.Result currentResult;
   private long bandwidth;
+  private long planValidityInterval;
+  private final Configuration config;
 
   /**
    * Constructs a Disk Balancer object. This object takes care of reading a
@@ -102,6 +106,7 @@ public class DiskBalancer {
    */
   public DiskBalancer(String dataNodeUUID,
                       Configuration conf, BlockMover blockMover) {
+    this.config = conf;
     this.currentResult = Result.NO_PLAN;
     this.blockMover = blockMover;
     this.dataset = this.blockMover.getDataset();
@@ -117,6 +122,10 @@ public class DiskBalancer {
     this.bandwidth = conf.getInt(
         DFSConfigKeys.DFS_DISK_BALANCER_MAX_DISK_THROUGHPUT,
         DFSConfigKeys.DFS_DISK_BALANCER_MAX_DISK_THROUGHPUT_DEFAULT);
+    this.planValidityInterval = conf.getTimeDuration(
+        DFSConfigKeys.DFS_DISK_BALANCER_PLAN_VALID_INTERVAL,
+        DFSConfigKeys.DFS_DISK_BALANCER_PLAN_VALID_INTERVAL_DEFAULT,
+        TimeUnit.MILLISECONDS);
   }
 
   /**
@@ -417,15 +426,17 @@ public class DiskBalancer {
     long now = Time.now();
     long planTime = plan.getTimeStamp();
 
-    // TODO : Support Valid Plan hours as a user configurable option.
-    if ((planTime +
-        (TimeUnit.HOURS.toMillis(
-            DiskBalancerConstants.DISKBALANCER_VALID_PLAN_HOURS))) < now) {
-      String hourString = "Plan was generated more than " +
-          Integer.toString(DiskBalancerConstants.DISKBALANCER_VALID_PLAN_HOURS)
-          + " hours ago.";
-      LOG.error("Disk Balancer - " + hourString);
-      throw new DiskBalancerException(hourString,
+    if ((planTime + planValidityInterval) < now) {
+      String planValidity = config.get(
+          DFSConfigKeys.DFS_DISK_BALANCER_PLAN_VALID_INTERVAL,
+          DFSConfigKeys.DFS_DISK_BALANCER_PLAN_VALID_INTERVAL_DEFAULT);
+      if (planValidity.matches("[0-9]$")) {
+        planValidity += "ms";
+      }
+      String errorString = "Plan was generated more than " + planValidity
+          + " ago";
+      LOG.error("Disk Balancer - " + errorString);
+      throw new DiskBalancerException(errorString,
           DiskBalancerException.Result.OLD_PLAN_SUBMITTED);
     }
   }
@@ -500,7 +511,8 @@ public class DiskBalancer {
         references = this.dataset.getFsVolumeReferences();
         for (int ndx = 0; ndx < references.size(); ndx++) {
           FsVolumeSpi vol = references.get(ndx);
-          storageIDToVolBasePathMap.put(vol.getStorageID(), vol.getBasePath());
+          storageIDToVolBasePathMap.put(vol.getStorageID(),
+              vol.getBaseURI().getPath());
         }
         references.close();
       }
@@ -892,15 +904,19 @@ public class DiskBalancer {
         try {
           ExtendedBlock block = iter.nextBlock();
 
-          // A valid block is a finalized block, we iterate until we get
-          // finalized blocks
-          if (!this.dataset.isValidBlock(block)) {
-            continue;
-          }
+          if (block != null) {
+            // A valid block is a finalized block, we iterate until we get
+            // finalized blocks
+            if (!this.dataset.isValidBlock(block)) {
+              continue;
+            }
 
-          // We don't look for the best, we just do first fit
-          if (isLessThanNeeded(block.getNumBytes(), item)) {
-            return block;
+            // We don't look for the best, we just do first fit
+            if (isLessThanNeeded(block.getNumBytes(), item)) {
+              return block;
+            }
+          } else {
+            LOG.info("There are no blocks in the blockPool {}", iter.getBlockPoolId());
           }
 
         } catch (IOException e) {
@@ -948,8 +964,8 @@ public class DiskBalancer {
       ExtendedBlock block = null;
       while (block == null && currentCount < poolIters.size()) {
         currentCount++;
-        poolIndex = poolIndex++ % poolIters.size();
-        FsVolumeSpi.BlockIterator currentPoolIter = poolIters.get(poolIndex);
+        int index = poolIndex++ % poolIters.size();
+        FsVolumeSpi.BlockIterator currentPoolIter = poolIters.get(index);
         block = getBlockToCopy(currentPoolIter, item);
       }
 
@@ -1010,20 +1026,24 @@ public class DiskBalancer {
         return;
       }
 
+      if (source.isTransientStorage() || dest.isTransientStorage()) {
+        final String errMsg = "Disk Balancer - Unable to support " +
+                "transient storage type.";
+        LOG.error(errMsg);
+        item.setErrMsg(errMsg);
+        return;
+      }
+
       List<FsVolumeSpi.BlockIterator> poolIters = new LinkedList<>();
       startTime = Time.now();
       item.setStartTime(startTime);
       secondsElapsed = 0;
 
-      if (source.isTransientStorage() || dest.isTransientStorage()) {
-        return;
-      }
-
       try {
         openPoolIters(source, poolIters);
         if (poolIters.size() == 0) {
           LOG.error("No block pools found on volume. volume : {}. Exiting.",
-              source.getBasePath());
+              source.getBaseURI());
           return;
         }
 
@@ -1033,17 +1053,16 @@ public class DiskBalancer {
             // Check for the max error count constraint.
             if (item.getErrorCount() > getMaxError(item)) {
               LOG.error("Exceeded the max error count. source {}, dest: {} " +
-                      "error count: {}", source.getBasePath(),
-                  dest.getBasePath(), item.getErrorCount());
-              this.setExitFlag();
-              continue;
+                      "error count: {}", source.getBaseURI(),
+                  dest.getBaseURI(), item.getErrorCount());
+              break;
             }
 
             // Check for the block tolerance constraint.
             if (isCloseEnough(item)) {
               LOG.info("Copy from {} to {} done. copied {} bytes and {} " +
                       "blocks.",
-                  source.getBasePath(), dest.getBasePath(),
+                  source.getBaseURI(), dest.getBaseURI(),
                   item.getBytesCopied(), item.getBlocksCopied());
               this.setExitFlag();
               continue;
@@ -1053,7 +1072,7 @@ public class DiskBalancer {
             // we are not able to find any blocks to copy.
             if (block == null) {
               LOG.error("No source blocks, exiting the copy. Source: {}, " +
-                  "Dest:{}", source.getBasePath(), dest.getBasePath());
+                  "Dest:{}", source.getBaseURI(), dest.getBaseURI());
               this.setExitFlag();
               continue;
             }
@@ -1081,14 +1100,13 @@ public class DiskBalancer {
               // exiting here.
               LOG.error("Destination volume: {} does not have enough space to" +
                   " accommodate a block. Block Size: {} Exiting from" +
-                  " copyBlocks.", dest.getBasePath(), block.getNumBytes());
-              this.setExitFlag();
-              continue;
+                  " copyBlocks.", dest.getBaseURI(), block.getNumBytes());
+              break;
             }
 
             LOG.debug("Moved block with size {} from  {} to {}",
-                block.getNumBytes(), source.getBasePath(),
-                dest.getBasePath());
+                block.getNumBytes(), source.getBaseURI(),
+                dest.getBaseURI());
 
             // Check for the max throughput constraint.
             // We sleep here to keep the promise that we will not
@@ -1112,6 +1130,11 @@ public class DiskBalancer {
           } catch (InterruptedException e) {
             LOG.error("Copy Block Thread interrupted, exiting the copy.");
             Thread.currentThread().interrupt();
+            item.incErrorCount();
+            this.setExitFlag();
+          } catch (RuntimeException ex) {
+            // Exiting if any run time exceptions.
+            LOG.error("Got an unexpected Runtime Exception {}", ex);
             item.incErrorCount();
             this.setExitFlag();
           }

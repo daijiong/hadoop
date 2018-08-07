@@ -71,6 +71,7 @@ public class TestFSRMStateStore extends RMStateStoreTestBase {
         init(conf);
         Assert.assertNull(fs);
         assertTrue(workingDirPathURI.equals(fsWorkingPath));
+        dispatcher.disableExitOnDispatchException();
         start();
         Assert.assertNotNull(fs);
       }
@@ -113,11 +114,11 @@ public class TestFSRMStateStore extends RMStateStoreTestBase {
       YarnConfiguration conf = new YarnConfiguration();
       conf.set(YarnConfiguration.FS_RM_STATE_STORE_URI,
           workingDirPathURI.toString());
-      conf.set(YarnConfiguration.FS_RM_STATE_STORE_RETRY_POLICY_SPEC,
-              "100,6000");
       conf.setInt(YarnConfiguration.FS_RM_STATE_STORE_NUM_RETRIES, 8);
       conf.setLong(YarnConfiguration.FS_RM_STATE_STORE_RETRY_INTERVAL_MS,
               900L);
+      conf.setLong(YarnConfiguration.RM_EPOCH, epoch);
+      conf.setLong(YarnConfiguration.RM_EPOCH_RANGE, getEpochRange());
       if (adminCheckEnable) {
         conf.setBoolean(
           YarnConfiguration.YARN_INTERMEDIATE_DATA_ENCRYPTION, true);
@@ -325,8 +326,6 @@ public class TestFSRMStateStore extends RMStateStoreTestBase {
           YarnConfiguration conf = new YarnConfiguration();
           conf.set(YarnConfiguration.FS_RM_STATE_STORE_URI,
               workingDirPathURI.toString());
-          conf.set(YarnConfiguration.FS_RM_STATE_STORE_RETRY_POLICY_SPEC,
-              "100,6000");
           this.store = new TestFileSystemRMStore(conf) {
             Version storedVersion = null;
 
@@ -409,7 +408,7 @@ public class TestFSRMStateStore extends RMStateStoreTestBase {
             store.storeApplicationStateInternal(
                 ApplicationId.newInstance(100L, 1),
                 ApplicationStateData.newInstance(111, 111, "user", null,
-                    RMAppState.ACCEPTED, "diagnostics", 333, null));
+                    RMAppState.ACCEPTED, "diagnostics", 222, 333, null));
           } catch (Exception e) {
             assertionFailedInThread.set(true);
             e.printStackTrace();

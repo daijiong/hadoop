@@ -21,6 +21,9 @@ package org.apache.hadoop.yarn.util.timeline;
 import java.io.IOException;
 import java.net.InetSocketAddress;
 
+import com.fasterxml.jackson.core.JsonGenerationException;
+import com.fasterxml.jackson.databind.JsonMappingException;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import org.apache.hadoop.classification.InterfaceAudience.Public;
 import org.apache.hadoop.classification.InterfaceStability.Evolving;
 import org.apache.hadoop.conf.Configuration;
@@ -32,9 +35,6 @@ import org.apache.hadoop.yarn.api.records.timeline.TimelineAbout;
 import org.apache.hadoop.yarn.conf.YarnConfiguration;
 import org.apache.hadoop.yarn.util.YarnVersionInfo;
 import org.apache.hadoop.yarn.webapp.YarnJacksonJaxbJsonProvider;
-import org.codehaus.jackson.JsonGenerationException;
-import org.codehaus.jackson.map.JsonMappingException;
-import org.codehaus.jackson.map.ObjectMapper;
 
 /**
  * The helper class for the timeline module.
@@ -118,15 +118,15 @@ public class TimelineUtils {
   }
 
   /**
-   * Returns whether the timeline service v.1.5 is enabled via configuration.
+   * Returns whether the timeline service v.1.5 is enabled by default via
+   * configuration.
    *
    * @param conf the configuration
    * @return whether the timeline service v.1.5 is enabled. V.1.5 refers to a
    * version equal to 1.5.
    */
   public static boolean timelineServiceV1_5Enabled(Configuration conf) {
-    return timelineServiceEnabled(conf) &&
-        Math.abs(getTimelineServiceVersion(conf) - 1.5) < 0.00001;
+    return YarnConfiguration.timelineServiceV15Enabled(conf);
   }
 
   public static TimelineAbout createTimelineAbout(String about) {

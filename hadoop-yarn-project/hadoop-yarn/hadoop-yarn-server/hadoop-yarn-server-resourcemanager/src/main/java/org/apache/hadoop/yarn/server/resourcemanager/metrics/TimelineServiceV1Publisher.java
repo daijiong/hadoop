@@ -88,7 +88,7 @@ public class TimelineServiceV1Publisher extends AbstractSystemMetricsPublisher {
         ApplicationMetricsConstants.UNMANAGED_APPLICATION_ENTITY_INFO,
         app.getApplicationSubmissionContext().getUnmanagedAM());
     entityInfo.put(ApplicationMetricsConstants.APPLICATION_PRIORITY_INFO,
-        app.getApplicationSubmissionContext().getPriority().getPriority());
+        app.getApplicationPriority().getPriority());
     entityInfo.put(ApplicationMetricsConstants.AM_NODE_LABEL_EXPRESSION,
         app.getAmNodeLabelExpression());
     entityInfo.put(ApplicationMetricsConstants.APP_NODE_LABEL_EXPRESSION,
@@ -108,6 +108,8 @@ public class TimelineServiceV1Publisher extends AbstractSystemMetricsPublisher {
         app.getApplicationSubmissionContext().getAMContainerSpec();
     entityInfo.put(ApplicationMetricsConstants.AM_CONTAINER_LAUNCH_COMMAND,
         amContainerSpec.getCommands());
+    entityInfo.put(ApplicationMetricsConstants.STATE_EVENT_INFO,
+        RMServerUtils.createApplicationState(app.getState()).toString());
 
     entity.setOtherInfo(entityInfo);
     TimelineEvent tEvent = new TimelineEvent();
@@ -144,12 +146,16 @@ public class TimelineServiceV1Publisher extends AbstractSystemMetricsPublisher {
         appMetrics.getVcoreSeconds());
     entity.addOtherInfo(ApplicationMetricsConstants.APP_MEM_METRICS,
         appMetrics.getMemorySeconds());
+    entity.addOtherInfo(ApplicationMetricsConstants.APP_MEM_PREEMPT_METRICS,
+            appMetrics.getPreemptedMemorySeconds());
+    entity.addOtherInfo(ApplicationMetricsConstants.APP_CPU_PREEMPT_METRICS,
+            appMetrics.getPreemptedVcoreSeconds());
     tEvent.setEventInfo(eventInfo);
 
     entity.addEvent(tEvent);
-    // sync sending of finish event to avoid possibility of saving application
-    // finished state in RMStateStore save without publishing in ATS.
-    putEntity(entity); // sync event so that ATS update is done without fail.
+
+    getDispatcher().getEventHandler().handle(new TimelineV1PublishEvent(
+        SystemMetricsEventType.PUBLISH_ENTITY, entity, app.getApplicationId()));
   }
 
   @SuppressWarnings("unchecked")
@@ -160,7 +166,7 @@ public class TimelineServiceV1Publisher extends AbstractSystemMetricsPublisher {
     eventInfo.put(ApplicationMetricsConstants.QUEUE_ENTITY_INFO,
         app.getQueue());
     eventInfo.put(ApplicationMetricsConstants.APPLICATION_PRIORITY_INFO,
-        app.getApplicationSubmissionContext().getPriority().getPriority());
+        app.getApplicationPriority().getPriority());
     TimelineEvent tEvent = new TimelineEvent();
     tEvent.setEventType(ApplicationMetricsConstants.UPDATED_EVENT_TYPE);
     tEvent.setTimestamp(updatedTime);
@@ -215,16 +221,16 @@ public class TimelineServiceV1Publisher extends AbstractSystemMetricsPublisher {
     tEvent.setEventType(AppAttemptMetricsConstants.REGISTERED_EVENT_TYPE);
     tEvent.setTimestamp(registeredTime);
     Map<String, Object> eventInfo = new HashMap<String, Object>();
-    eventInfo.put(AppAttemptMetricsConstants.TRACKING_URL_EVENT_INFO,
+    eventInfo.put(AppAttemptMetricsConstants.TRACKING_URL_INFO,
         appAttempt.getTrackingUrl());
-    eventInfo.put(AppAttemptMetricsConstants.ORIGINAL_TRACKING_URL_EVENT_INFO,
+    eventInfo.put(AppAttemptMetricsConstants.ORIGINAL_TRACKING_URL_INFO,
         appAttempt.getOriginalTrackingUrl());
-    eventInfo.put(AppAttemptMetricsConstants.HOST_EVENT_INFO,
+    eventInfo.put(AppAttemptMetricsConstants.HOST_INFO,
         appAttempt.getHost());
-    eventInfo.put(AppAttemptMetricsConstants.RPC_PORT_EVENT_INFO,
+    eventInfo.put(AppAttemptMetricsConstants.RPC_PORT_INFO,
         appAttempt.getRpcPort());
     if (appAttempt.getMasterContainer() != null) {
-      eventInfo.put(AppAttemptMetricsConstants.MASTER_CONTAINER_EVENT_INFO,
+      eventInfo.put(AppAttemptMetricsConstants.MASTER_CONTAINER_INFO,
           appAttempt.getMasterContainer().getId().toString());
     }
     tEvent.setEventInfo(eventInfo);
@@ -246,18 +252,18 @@ public class TimelineServiceV1Publisher extends AbstractSystemMetricsPublisher {
     tEvent.setEventType(AppAttemptMetricsConstants.FINISHED_EVENT_TYPE);
     tEvent.setTimestamp(finishedTime);
     Map<String, Object> eventInfo = new HashMap<String, Object>();
-    eventInfo.put(AppAttemptMetricsConstants.TRACKING_URL_EVENT_INFO,
+    eventInfo.put(AppAttemptMetricsConstants.TRACKING_URL_INFO,
         appAttempt.getTrackingUrl());
-    eventInfo.put(AppAttemptMetricsConstants.ORIGINAL_TRACKING_URL_EVENT_INFO,
+    eventInfo.put(AppAttemptMetricsConstants.ORIGINAL_TRACKING_URL_INFO,
         appAttempt.getOriginalTrackingUrl());
-    eventInfo.put(AppAttemptMetricsConstants.DIAGNOSTICS_INFO_EVENT_INFO,
+    eventInfo.put(AppAttemptMetricsConstants.DIAGNOSTICS_INFO,
         appAttempt.getDiagnostics());
-    eventInfo.put(AppAttemptMetricsConstants.FINAL_STATUS_EVENT_INFO,
+    eventInfo.put(AppAttemptMetricsConstants.FINAL_STATUS_INFO,
         app.getFinalApplicationStatus().toString());
-    eventInfo.put(AppAttemptMetricsConstants.STATE_EVENT_INFO, RMServerUtils
+    eventInfo.put(AppAttemptMetricsConstants.STATE_INFO, RMServerUtils
         .createApplicationAttemptState(appAttemtpState).toString());
     if (appAttempt.getMasterContainer() != null) {
-      eventInfo.put(AppAttemptMetricsConstants.MASTER_CONTAINER_EVENT_INFO,
+      eventInfo.put(AppAttemptMetricsConstants.MASTER_CONTAINER_INFO,
           appAttempt.getMasterContainer().getId().toString());
     }
     tEvent.setEventInfo(eventInfo);
@@ -273,18 +279,18 @@ public class TimelineServiceV1Publisher extends AbstractSystemMetricsPublisher {
   public void containerCreated(RMContainer container, long createdTime) {
     TimelineEntity entity = createContainerEntity(container.getContainerId());
     Map<String, Object> entityInfo = new HashMap<String, Object>();
-    entityInfo.put(ContainerMetricsConstants.ALLOCATED_MEMORY_ENTITY_INFO,
+    entityInfo.put(ContainerMetricsConstants.ALLOCATED_MEMORY_INFO,
         container.getAllocatedResource().getMemorySize());
-    entityInfo.put(ContainerMetricsConstants.ALLOCATED_VCORE_ENTITY_INFO,
+    entityInfo.put(ContainerMetricsConstants.ALLOCATED_VCORE_INFO,
         container.getAllocatedResource().getVirtualCores());
-    entityInfo.put(ContainerMetricsConstants.ALLOCATED_HOST_ENTITY_INFO,
+    entityInfo.put(ContainerMetricsConstants.ALLOCATED_HOST_INFO,
         container.getAllocatedNode().getHost());
-    entityInfo.put(ContainerMetricsConstants.ALLOCATED_PORT_ENTITY_INFO,
+    entityInfo.put(ContainerMetricsConstants.ALLOCATED_PORT_INFO,
         container.getAllocatedNode().getPort());
-    entityInfo.put(ContainerMetricsConstants.ALLOCATED_PRIORITY_ENTITY_INFO,
+    entityInfo.put(ContainerMetricsConstants.ALLOCATED_PRIORITY_INFO,
         container.getAllocatedPriority().getPriority());
     entityInfo.put(
-        ContainerMetricsConstants.ALLOCATED_HOST_HTTP_ADDRESS_ENTITY_INFO,
+        ContainerMetricsConstants.ALLOCATED_HOST_HTTP_ADDRESS_INFO,
         container.getNodeHttpAddress());
     entity.setOtherInfo(entityInfo);
 
@@ -307,16 +313,16 @@ public class TimelineServiceV1Publisher extends AbstractSystemMetricsPublisher {
     tEvent.setEventType(ContainerMetricsConstants.FINISHED_EVENT_TYPE);
     tEvent.setTimestamp(finishedTime);
     Map<String, Object> eventInfo = new HashMap<String, Object>();
-    eventInfo.put(ContainerMetricsConstants.DIAGNOSTICS_INFO_EVENT_INFO,
+    eventInfo.put(ContainerMetricsConstants.DIAGNOSTICS_INFO,
         container.getDiagnosticsInfo());
-    eventInfo.put(ContainerMetricsConstants.EXIT_STATUS_EVENT_INFO,
+    eventInfo.put(ContainerMetricsConstants.EXIT_STATUS_INFO,
         container.getContainerExitStatus());
-    eventInfo.put(ContainerMetricsConstants.STATE_EVENT_INFO,
+    eventInfo.put(ContainerMetricsConstants.STATE_INFO,
         container.getContainerState().toString());
     Map<String, Object> entityInfo = new HashMap<String, Object>();
-    entityInfo.put(ContainerMetricsConstants.ALLOCATED_HOST_ENTITY_INFO,
+    entityInfo.put(ContainerMetricsConstants.ALLOCATED_HOST_INFO,
         container.getAllocatedNode().getHost());
-    entityInfo.put(ContainerMetricsConstants.ALLOCATED_PORT_ENTITY_INFO,
+    entityInfo.put(ContainerMetricsConstants.ALLOCATED_PORT_INFO,
         container.getAllocatedNode().getPort());
     entity.setOtherInfo(entityInfo);
     tEvent.setEventInfo(eventInfo);

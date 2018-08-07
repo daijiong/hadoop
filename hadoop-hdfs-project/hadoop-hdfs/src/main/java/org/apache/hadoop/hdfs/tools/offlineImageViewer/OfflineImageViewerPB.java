@@ -33,6 +33,7 @@ import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.classification.InterfaceAudience;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.net.NetUtils;
+import org.apache.hadoop.util.StringUtils;
 
 /**
  * OfflineImageViewerPB to dump the contents of an Hadoop image file to XML or
@@ -71,6 +72,7 @@ public class OfflineImageViewerPB {
       + "     rather than a number of bytes. (false by default)\n"
       + "  * Web: Run a viewer to expose read-only WebHDFS API.\n"
       + "    -addr specifies the address to listen. (localhost:5978 by default)\n"
+      + "    It does not support secure mode nor HTTPS.\n"
       + "  * Delimited (experimental): Generate a text file with all of the elements common\n"
       + "    to both inodes and inodes-under-construction, separated by a\n"
       + "    delimiter. The default delimiter is \\t, though this may be\n"
@@ -174,8 +176,8 @@ public class OfflineImageViewerPB {
     Configuration conf = new Configuration();
     try (PrintStream out = outputFile.equals("-") ?
         System.out : new PrintStream(outputFile, "UTF-8")) {
-      switch (processor) {
-      case "FileDistribution":
+      switch (StringUtils.toUpperCase(processor)) {
+      case "FILEDISTRIBUTION":
         long maxSize = Long.parseLong(cmd.getOptionValue("maxSize", "0"));
         int step = Integer.parseInt(cmd.getOptionValue("step", "0"));
         boolean formatOutput = cmd.hasOption("format");
@@ -186,7 +188,7 @@ public class OfflineImageViewerPB {
         new PBImageXmlWriter(conf, out).visit(new RandomAccessFile(inputFile,
             "r"));
         break;
-      case "ReverseXML":
+      case "REVERSEXML":
         try {
           OfflineImageReconstructor.run(inputFile, outputFile);
         } catch (Exception e) {
@@ -196,14 +198,14 @@ public class OfflineImageViewerPB {
           System.exit(1);
         }
         break;
-      case "Web":
+      case "WEB":
         String addr = cmd.getOptionValue("addr", "localhost:5978");
         try (WebImageViewer viewer =
-            new WebImageViewer(NetUtils.createSocketAddr(addr))) {
+            new WebImageViewer(NetUtils.createSocketAddr(addr), conf)) {
           viewer.start(inputFile);
         }
         break;
-      case "Delimited":
+      case "DELIMITED":
         try (PBImageDelimitedTextWriter writer =
             new PBImageDelimitedTextWriter(out, delimiter, tempPath)) {
           writer.visit(new RandomAccessFile(inputFile, "r"));

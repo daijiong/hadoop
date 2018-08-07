@@ -17,18 +17,28 @@
  */
 package org.apache.hadoop.hdfs.web;
 
-import org.apache.hadoop.fs.*;
+import com.google.common.collect.ImmutableMap;
+import org.apache.hadoop.fs.BlockLocation;
+import org.apache.hadoop.fs.ContentSummary;
+import org.apache.hadoop.fs.FileChecksum;
+import org.apache.hadoop.fs.FileStatus;
+import org.apache.hadoop.fs.FsServerDefaults;
+import org.apache.hadoop.fs.MD5MD5CRC32FileChecksum;
+import org.apache.hadoop.fs.StorageType;
+import org.apache.hadoop.fs.XAttr;
+import org.apache.hadoop.fs.XAttrCodec;
 import org.apache.hadoop.fs.permission.AclEntry;
 import org.apache.hadoop.fs.permission.AclStatus;
 import org.apache.hadoop.fs.permission.FsPermission;
+import org.apache.hadoop.hdfs.DFSUtilClient;
 import org.apache.hadoop.hdfs.XAttrHelper;
 import org.apache.hadoop.hdfs.protocol.*;
 import org.apache.hadoop.ipc.RemoteException;
 import org.apache.hadoop.security.token.Token;
 import org.apache.hadoop.security.token.TokenIdentifier;
 import org.apache.hadoop.util.StringUtils;
-import org.codehaus.jackson.map.ObjectMapper;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.google.common.collect.Lists;
 
 import java.io.IOException;
@@ -110,20 +120,32 @@ public class JsonUtil {
     m.put("pathSuffix", status.getLocalName());
     m.put("type", WebHdfsConstants.PathType.valueOf(status));
     if (status.isSymlink()) {
-      m.put("symlink", status.getSymlink());
+      m.put("symlink", DFSUtilClient.bytes2String(status.getSymlinkInBytes()));
     }
-
     m.put("length", status.getLen());
     m.put("owner", status.getOwner());
     m.put("group", status.getGroup());
     FsPermission perm = status.getPermission();
     m.put("permission", toString(perm));
-    if (perm.getAclBit()) {
+    if (status.hasAcl()) {
       m.put("aclBit", true);
     }
-    if (perm.getEncryptedBit()) {
+    if (status.isEncrypted()) {
       m.put("encBit", true);
     }
+    if (status.isErasureCoded()) {
+      m.put("ecBit", true);
+      if (status.getErasureCodingPolicy() != null) {
+        // to maintain backward comparability
+        m.put("ecPolicy", status.getErasureCodingPolicy().getName());
+        // to re-construct HdfsFileStatus object via WebHdfs
+        m.put("ecPolicyObj", getEcPolicyAsMap(status.getErasureCodingPolicy()));
+      }
+    }
+    if (status.isSnapshotEnabled()) {
+      m.put("snapshotEnabled", status.isSnapshotEnabled());
+    }
+
     m.put("accessTime", status.getAccessTime());
     m.put("modificationTime", status.getModificationTime());
     m.put("blockSize", status.getBlockSize());
@@ -132,6 +154,21 @@ public class JsonUtil {
     m.put("childrenNum", status.getChildrenNum());
     m.put("storagePolicy", status.getStoragePolicy());
     return m;
+  }
+
+  private static Map<String, Object> getEcPolicyAsMap(
+      final ErasureCodingPolicy ecPolicy) {
+    /** Convert an ErasureCodingPolicy to a map. */
+    ImmutableMap.Builder<String, Object> builder = ImmutableMap.builder();
+    builder.put("name", ecPolicy.getName())
+        .put("cellSize", ecPolicy.getCellSize())
+        .put("numDataUnits", ecPolicy.getNumDataUnits())
+        .put("numParityUnits", ecPolicy.getNumParityUnits())
+        .put("codecName", ecPolicy.getCodecName())
+        .put("id", ecPolicy.getId())
+        .put("extraOptions", ecPolicy.getSchema().getExtraOptions());
+    return builder.build();
+
   }
 
   /** Convert an ExtendedBlock to a Json map. */
@@ -181,6 +218,9 @@ public class JsonUtil {
     if (datanodeinfo.getUpgradeDomain() != null) {
       m.put("upgradeDomain", datanodeinfo.getUpgradeDomain());
     }
+    m.put("lastBlockReportTime", datanodeinfo.getLastBlockReportTime());
+    m.put("lastBlockReportMonotonic",
+        datanodeinfo.getLastBlockReportMonotonic());
     return m;
   }
 
@@ -360,19 +400,13 @@ public class JsonUtil {
 
     final List<String> stringEntries = new ArrayList<>();
     for (AclEntry entry : status.getEntries()) {
-      stringEntries.add(entry.toString());
+      stringEntries.add(entry.toStringStable());
     }
     m.put("entries", stringEntries);
 
     FsPermission perm = status.getPermission();
     if (perm != null) {
       m.put("permission", toString(perm));
-      if (perm.getAclBit()) {
-        m.put("aclBit", true);
-      }
-      if (perm.getEncryptedBit()) {
-        m.put("encBit", true);
-      }
     }
     final Map<String, Map<String, Object>> finalMap =
         new TreeMap<String, Map<String, Object>>();
@@ -436,4 +470,106 @@ public class JsonUtil {
     return MAPPER.writeValueAsString(obj);
   }
 
+  public static String toJsonString(BlockStoragePolicy[] storagePolicies) {
+    final Map<String, Object> blockStoragePolicies = new TreeMap<>();
+    Object[] a = null;
+    if (storagePolicies != null && storagePolicies.length > 0) {
+      a = new Object[storagePolicies.length];
+      for (int i = 0; i < storagePolicies.length; i++) {
+        a[i] = toJsonMap(storagePolicies[i]);
+      }
+    }
+    blockStoragePolicies.put("BlockStoragePolicy", a);
+    return toJsonString("BlockStoragePolicies", blockStoragePolicies);
+  }
+
+  private static Object toJsonMap(BlockStoragePolicy blockStoragePolicy) {
+    final Map<String, Object> m = new TreeMap<String, Object>();
+    m.put("id", blockStoragePolicy.getId());
+    m.put("name", blockStoragePolicy.getName());
+    m.put("storageTypes", blockStoragePolicy.getStorageTypes());
+    m.put("creationFallbacks", blockStoragePolicy.getCreationFallbacks());
+    m.put("replicationFallbacks", blockStoragePolicy.getReplicationFallbacks());
+    m.put("copyOnCreateFile", blockStoragePolicy.isCopyOnCreateFile());
+    return m;
+  }
+
+  public static String toJsonString(BlockStoragePolicy storagePolicy) {
+    return toJsonString(BlockStoragePolicy.class, toJsonMap(storagePolicy));
+  }
+
+  public static String toJsonString(FsServerDefaults serverDefaults) {
+    return toJsonString(FsServerDefaults.class, toJsonMap(serverDefaults));
+  }
+
+  private static Object toJsonMap(FsServerDefaults serverDefaults) {
+    final Map<String, Object> m = new HashMap<String, Object>();
+    m.put("blockSize", serverDefaults.getBlockSize());
+    m.put("bytesPerChecksum", serverDefaults.getBytesPerChecksum());
+    m.put("writePacketSize", serverDefaults.getWritePacketSize());
+    m.put("replication", serverDefaults.getReplication());
+    m.put("fileBufferSize", serverDefaults.getFileBufferSize());
+    m.put("encryptDataTransfer", serverDefaults.getEncryptDataTransfer());
+    m.put("trashInterval", serverDefaults.getTrashInterval());
+    m.put("checksumType", serverDefaults.getChecksumType().id);
+    m.put("keyProviderUri", serverDefaults.getKeyProviderUri());
+    m.put("defaultStoragePolicyId", serverDefaults.getDefaultStoragePolicyId());
+    return m;
+  }
+
+  public static String toJsonString(SnapshotDiffReport diffReport) {
+    return toJsonString(SnapshotDiffReport.class.getSimpleName(),
+        toJsonMap(diffReport));
+  }
+
+  private static Object toJsonMap(SnapshotDiffReport diffReport) {
+    final Map<String, Object> m = new TreeMap<String, Object>();
+    m.put("snapshotRoot", diffReport.getSnapshotRoot());
+    m.put("fromSnapshot", diffReport.getFromSnapshot());
+    m.put("toSnapshot", diffReport.getLaterSnapshotName());
+    Object[] diffList = new Object[diffReport.getDiffList().size()];
+    for (int i = 0; i < diffReport.getDiffList().size(); i++) {
+      diffList[i] = toJsonMap(diffReport.getDiffList().get(i));
+    }
+    m.put("diffList", diffList);
+    return m;
+  }
+
+  private static Object toJsonMap(
+      SnapshotDiffReport.DiffReportEntry diffReportEntry) {
+    final Map<String, Object> m = new TreeMap<String, Object>();
+    m.put("type", diffReportEntry.getType());
+    if (diffReportEntry.getSourcePath() != null) {
+      m.put("sourcePath",
+          DFSUtilClient.bytes2String(diffReportEntry.getSourcePath()));
+    }
+    if (diffReportEntry.getTargetPath() != null) {
+      m.put("targetPath",
+          DFSUtilClient.bytes2String(diffReportEntry.getTargetPath()));
+    }
+    return m;
+  }
+
+  public static String toJsonString(
+      SnapshottableDirectoryStatus[] snapshottableDirectoryList) {
+    if (snapshottableDirectoryList == null) {
+      return toJsonString("SnapshottableDirectoryList", null);
+    }
+    Object[] a = new Object[snapshottableDirectoryList.length];
+    for (int i = 0; i < snapshottableDirectoryList.length; i++) {
+      a[i] = toJsonMap(snapshottableDirectoryList[i]);
+    }
+    return toJsonString("SnapshottableDirectoryList", a);
+  }
+
+  private static Object toJsonMap(
+      SnapshottableDirectoryStatus snapshottableDirectoryStatus) {
+    final Map<String, Object> m = new TreeMap<String, Object>();
+    m.put("snapshotNumber", snapshottableDirectoryStatus.getSnapshotNumber());
+    m.put("snapshotQuota", snapshottableDirectoryStatus.getSnapshotQuota());
+    m.put("parentFullPath", DFSUtilClient
+        .bytes2String(snapshottableDirectoryStatus.getParentFullPath()));
+    m.put("dirStatus", toJsonMap(snapshottableDirectoryStatus.getDirStatus()));
+    return m;
+  }
 }

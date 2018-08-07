@@ -56,11 +56,11 @@ import org.apache.hadoop.security.authentication.client.ConnectionConfigurator;
 import org.apache.hadoop.security.ssl.KeyStoreTestUtil;
 import org.apache.hadoop.security.token.SecretManager.InvalidToken;
 import org.apache.hadoop.test.GenericTestUtils;
+import org.apache.hadoop.test.Whitebox;
 import org.apache.hadoop.security.token.Token;
 import org.junit.Assert;
 import org.junit.BeforeClass;
 import org.junit.Test;
-import org.mockito.internal.util.reflection.Whitebox;
 
 public class TestWebHdfsTokens {
   private static Configuration conf;
@@ -130,7 +130,7 @@ public class TestWebHdfsTokens {
     verify(fs, never()).setDelegationToken(any());
   }
 
-  @Test(timeout = 1000)
+  @Test(timeout = 10000)
   public void testGetOpRequireAuth() {
     for (HttpOpParam.Op op : GetOpParam.Op.values()) {
       boolean expect = (op == GetOpParam.Op.GETDELEGATIONTOKEN);
@@ -138,7 +138,7 @@ public class TestWebHdfsTokens {
     }
   }
 
-  @Test(timeout = 1000)
+  @Test(timeout = 10000)
   public void testPutOpRequireAuth() {
     for (HttpOpParam.Op op : PutOpParam.Op.values()) {
       boolean expect = (op == PutOpParam.Op.RENEWDELEGATIONTOKEN || op == PutOpParam.Op.CANCELDELEGATIONTOKEN);
@@ -146,14 +146,14 @@ public class TestWebHdfsTokens {
     }
   }
 
-  @Test(timeout = 1000)
+  @Test(timeout = 10000)
   public void testPostOpRequireAuth() {
     for (HttpOpParam.Op op : PostOpParam.Op.values()) {
       assertFalse(op.getRequireAuth());
     }
   }
 
-  @Test(timeout = 1000)
+  @Test(timeout = 10000)
   public void testDeleteOpRequireAuth() {
     for (HttpOpParam.Op op : DeleteOpParam.Op.values()) {
       assertFalse(op.getRequireAuth());
@@ -193,6 +193,8 @@ public class TestWebHdfsTokens {
   public void testLazyTokenFetchForSWebhdfs() throws Exception {
     MiniDFSCluster cluster = null;
     SWebHdfsFileSystem fs = null;
+    String keystoresDir;
+    String sslConfDir;
     try {
       final Configuration clusterConf = new HdfsConfiguration(conf);
       SecurityUtil.setAuthenticationMethod(SIMPLE, clusterConf);
@@ -200,8 +202,6 @@ public class TestWebHdfsTokens {
 	    .DFS_NAMENODE_DELEGATION_TOKEN_ALWAYS_USE_KEY, true);
       String baseDir =
           GenericTestUtils.getTempPath(TestWebHdfsTokens.class.getSimpleName());
-      String keystoresDir;
-      String sslConfDir;
 	    
       clusterConf.set(DFSConfigKeys.DFS_HTTP_POLICY_KEY, HttpConfig.Policy.HTTPS_ONLY.name());
       clusterConf.set(DFSConfigKeys.DFS_NAMENODE_HTTPS_ADDRESS_KEY, "localhost:0");
@@ -238,6 +238,7 @@ public class TestWebHdfsTokens {
           cluster.shutdown();
         }
      }
+    KeyStoreTestUtil.cleanupSSLConfig(keystoresDir, sslConfDir);
   }
 
   @Test
@@ -384,7 +385,7 @@ public class TestWebHdfsTokens {
     InputStream is = fs.open(p);
     is.read();
     is.close();
-    verify(fs, times(2)).getDelegationToken(); // first bad, then good
+    verify(fs, times(3)).getDelegationToken(); // first bad, then good
     verify(fs, times(1)).replaceExpiredDelegationToken();
     verify(fs, times(1)).getDelegationToken(null);
     verify(fs, times(1)).setDelegationToken(any());
@@ -401,7 +402,7 @@ public class TestWebHdfsTokens {
     is = fs.open(p);
     is.read();
     is.close();
-    verify(fs, times(2)).getDelegationToken(); // first bad, then good
+    verify(fs, times(3)).getDelegationToken(); // first bad, then good
     verify(fs, times(1)).replaceExpiredDelegationToken();
     verify(fs, times(1)).getDelegationToken(null);
     verify(fs, times(1)).setDelegationToken(any());

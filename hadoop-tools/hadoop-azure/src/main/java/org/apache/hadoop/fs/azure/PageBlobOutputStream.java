@@ -36,7 +36,7 @@ import java.util.concurrent.TimeUnit;
 
 import org.apache.hadoop.fs.Syncable;
 import org.apache.hadoop.fs.azure.StorageInterface.CloudPageBlobWrapper;
-import org.apache.commons.lang.exception.ExceptionUtils;
+import org.apache.commons.lang3.exception.ExceptionUtils;
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.conf.Configuration;
@@ -376,6 +376,18 @@ final class PageBlobOutputStream extends OutputStream implements Syncable {
     outBuffer = new ByteArrayOutputStream();
   }
 
+  @VisibleForTesting
+  synchronized void waitForLastFlushCompletion() throws IOException {
+    try {
+      if (lastQueuedTask != null) {
+        lastQueuedTask.waitTillDone();
+      }
+    } catch (InterruptedException e1) {
+      // Restore the interrupted status
+      Thread.currentThread().interrupt();
+    }
+  }
+
   /**
    * Extend the page blob file if we are close to the end.
    */
@@ -554,7 +566,6 @@ final class PageBlobOutputStream extends OutputStream implements Syncable {
   }
 
   @Override
-
   public void hflush() throws IOException {
 
     // hflush is required to force data to storage, so call hsync,

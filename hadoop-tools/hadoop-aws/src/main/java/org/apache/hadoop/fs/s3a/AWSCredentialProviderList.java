@@ -22,15 +22,20 @@ import com.amazonaws.AmazonClientException;
 import com.amazonaws.auth.AWSCredentials;
 import com.amazonaws.auth.AWSCredentialsProvider;
 import com.amazonaws.auth.AnonymousAWSCredentials;
-import org.apache.commons.lang.StringUtils;
+import com.google.common.annotations.VisibleForTesting;
+import org.apache.commons.lang3.StringUtils;
 import org.apache.hadoop.classification.InterfaceAudience;
 import org.apache.hadoop.classification.InterfaceStability;
+import org.apache.hadoop.io.IOUtils;
+
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.io.Closeable;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.List;
+import java.util.stream.Collectors;
 
 /**
  * A list of providers.
@@ -49,7 +54,8 @@ import java.util.List;
  */
 @InterfaceAudience.Private
 @InterfaceStability.Evolving
-public class AWSCredentialProviderList implements AWSCredentialsProvider {
+public class AWSCredentialProviderList implements AWSCredentialsProvider,
+    AutoCloseable {
 
   private static final Logger LOG = LoggerFactory.getLogger(
       AWSCredentialProviderList.class);
@@ -81,23 +87,6 @@ public class AWSCredentialProviderList implements AWSCredentialsProvider {
    */
   public void add(AWSCredentialsProvider p) {
     providers.add(p);
-  }
-
-  /**
-   * Reuse the last provider?
-   * @param reuseLastProvider flag to indicate the last provider should
-   * be re-used
-   */
-  public void setReuseLastProvider(boolean reuseLastProvider) {
-    this.reuseLastProvider = reuseLastProvider;
-  }
-
-  /**
-   * query the {@link #reuseLastProvider} flag.
-   * @return the current flag state.
-   */
-  public boolean isReuseLastProvider() {
-    return reuseLastProvider;
   }
 
   /**
@@ -152,6 +141,16 @@ public class AWSCredentialProviderList implements AWSCredentialsProvider {
   }
 
   /**
+   * Returns the underlying list of providers.
+   *
+   * @return providers
+   */
+  @VisibleForTesting
+  List<AWSCredentialsProvider> getProviders() {
+    return providers;
+  }
+
+  /**
    * Verify that the provider list is not empty.
    * @throws AmazonClientException if there are no providers.
    */
@@ -167,12 +166,9 @@ public class AWSCredentialProviderList implements AWSCredentialsProvider {
    * If there are no providers, "" is returned.
    */
   public String listProviderNames() {
-    StringBuilder sb = new StringBuilder(providers.size() * 32);
-    for (AWSCredentialsProvider provider : providers) {
-      sb.append(provider.getClass().getSimpleName());
-      sb.append(' ');
-    }
-    return sb.toString();
+    return providers.stream()
+        .map(provider -> provider.getClass().getSimpleName() + ' ')
+        .collect(Collectors.joining());
   }
 
   /**
@@ -184,5 +180,20 @@ public class AWSCredentialProviderList implements AWSCredentialsProvider {
   public String toString() {
     return "AWSCredentialProviderList: " +
         StringUtils.join(providers, " ");
+  }
+
+  /**
+   * Close routine will close all providers in the list which implement
+   * {@code Closeable}.
+   * This matters because some providers start a background thread to
+   * refresh their secrets.
+   */
+  @Override
+  public void close() {
+    for(AWSCredentialsProvider p: providers) {
+      if (p instanceof Closeable) {
+        IOUtils.closeStream((Closeable)p);
+      }
+    }
   }
 }

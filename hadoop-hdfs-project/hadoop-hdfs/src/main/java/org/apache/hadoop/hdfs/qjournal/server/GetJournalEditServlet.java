@@ -31,7 +31,7 @@ import javax.servlet.http.HttpServlet;
 import javax.servlet.http.HttpServletRequest;
 import javax.servlet.http.HttpServletResponse;
 
-import org.apache.commons.lang.StringEscapeUtils;
+import org.apache.commons.text.StringEscapeUtils;
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.classification.InterfaceAudience;
@@ -72,6 +72,7 @@ public class GetJournalEditServlet extends HttpServlet {
   static final String STORAGEINFO_PARAM = "storageInfo";
   static final String JOURNAL_ID_PARAM = "jid";
   static final String SEGMENT_TXID_PARAM = "segmentTxId";
+  static final String IN_PROGRESS_OK = "inProgressOk";
 
   protected boolean isValidRequestor(HttpServletRequest request, Configuration conf)
       throws IOException {
@@ -156,7 +157,7 @@ public class GetJournalEditServlet extends HttpServlet {
     int myNsId = storage.getNamespaceID();
     String myClusterId = storage.getClusterID();
     
-    String theirStorageInfoString = StringEscapeUtils.escapeHtml(
+    String theirStorageInfoString = StringEscapeUtils.escapeHtml4(
         request.getParameter(STORAGEINFO_PARAM));
 
     if (theirStorageInfoString != null) {
@@ -186,6 +187,14 @@ public class GetJournalEditServlet extends HttpServlet {
       final Configuration conf = (Configuration) getServletContext()
           .getAttribute(JspHelper.CURRENT_CONF);
       final String journalId = request.getParameter(JOURNAL_ID_PARAM);
+      final String inProgressOkStr = request.getParameter(IN_PROGRESS_OK);
+      final boolean inProgressOk;
+      if (inProgressOkStr != null &&
+          inProgressOkStr.equalsIgnoreCase("false")) {
+        inProgressOk = false;
+      } else {
+        inProgressOk = true;
+      }
       QuorumJournalManager.checkJournalId(journalId);
       final JNStorage storage = JournalNodeHttpServer
           .getJournalFromContext(context, journalId).getStorage();
@@ -210,8 +219,7 @@ public class GetJournalEditServlet extends HttpServlet {
         // Synchronize on the FJM so that the file doesn't get finalized
         // out from underneath us while we're in the process of opening
         // it up.
-        EditLogFile elf = fjm.getLogFile(
-            segmentTxId);
+        EditLogFile elf = fjm.getLogFile(segmentTxId, inProgressOk);
         if (elf == null) {
           response.sendError(HttpServletResponse.SC_NOT_FOUND,
               "No edit log found starting at txid " + segmentTxId);
@@ -239,7 +247,7 @@ public class GetJournalEditServlet extends HttpServlet {
   }
 
   public static String buildPath(String journalId, long segmentTxId,
-      NamespaceInfo nsInfo) {
+      NamespaceInfo nsInfo, boolean inProgressOk) {
     StringBuilder path = new StringBuilder("/getJournal?");
     try {
       path.append(JOURNAL_ID_PARAM).append("=")
@@ -248,6 +256,8 @@ public class GetJournalEditServlet extends HttpServlet {
           .append(segmentTxId);
       path.append("&" + STORAGEINFO_PARAM).append("=")
           .append(URLEncoder.encode(nsInfo.toColonSeparatedString(), "UTF-8"));
+      path.append("&" + IN_PROGRESS_OK).append("=")
+          .append(inProgressOk);
     } catch (UnsupportedEncodingException e) {
       // Never get here -- everyone supports UTF-8
       throw new RuntimeException(e);

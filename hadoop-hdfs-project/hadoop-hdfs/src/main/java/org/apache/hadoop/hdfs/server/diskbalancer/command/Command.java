@@ -18,14 +18,16 @@
 
 package org.apache.hadoop.hdfs.server.diskbalancer.command;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.ObjectReader;
 import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.Preconditions;
 import com.google.common.collect.Lists;
 
 import org.apache.commons.cli.CommandLine;
 import org.apache.commons.cli.Option;
-import org.apache.commons.lang.StringUtils;
-import org.apache.commons.lang.text.StrBuilder;
+import org.apache.commons.lang3.StringUtils;
+import org.apache.commons.text.TextStringBuilder;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.conf.Configured;
 import org.apache.hadoop.fs.CommonConfigurationKeys;
@@ -47,17 +49,17 @@ import org.apache.hadoop.hdfs.server.diskbalancer.datamodel.DiskBalancerVolumeSe
 import org.apache.hadoop.hdfs.tools.DiskBalancerCLI;
 import org.apache.hadoop.net.NetUtils;
 import org.apache.hadoop.security.UserGroupInformation;
-import org.codehaus.jackson.map.ObjectMapper;
-import org.codehaus.jackson.map.ObjectReader;
+import org.apache.hadoop.util.HostsFileReader;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.io.Closeable;
+import java.io.FileNotFoundException;
 import java.io.IOException;
+import java.io.PrintStream;
 import java.net.InetSocketAddress;
 import java.net.URI;
 import java.net.URL;
-import java.nio.charset.Charset;
-import java.nio.file.Files;
 import java.nio.file.Paths;
 import java.text.SimpleDateFormat;
 import java.util.Collections;
@@ -73,15 +75,16 @@ import java.util.TreeSet;
 /**
  * Common interface for command handling.
  */
-public abstract class Command extends Configured {
+public abstract class Command extends Configured implements Closeable {
   private static final ObjectReader READER =
-      new ObjectMapper().reader(HashMap.class);
+      new ObjectMapper().readerFor(HashMap.class);
   static final Logger LOG = LoggerFactory.getLogger(Command.class);
   private Map<String, String> validArgs = new HashMap<>();
   private URI clusterURI;
   private FileSystem fs = null;
   private DiskBalancerCluster cluster = null;
   private int topNodes;
+  private PrintStream ps;
 
   private static final Path DEFAULT_LOG_DIR = new Path("/system/diskbalancer");
 
@@ -91,9 +94,41 @@ public abstract class Command extends Configured {
    * Constructs a command.
    */
   public Command(Configuration conf) {
+    this(conf, System.out);
+  }
+
+  /**
+   * Constructs a command.
+   */
+  public Command(Configuration conf, final PrintStream ps) {
     super(conf);
     // These arguments are valid for all commands.
     topNodes = 0;
+    this.ps = ps;
+  }
+
+  /**
+   * Cleans any resources held by this command.
+   * <p>
+   * The main goal is to delete id file created in
+   * {@link org.apache.hadoop.hdfs.server.balancer
+   * .NameNodeConnector#checkAndMarkRunning}
+   * , otherwise, it's not allowed to run multiple commands in a row.
+   * </p>
+   */
+  @Override
+  public void close() throws IOException {
+    if (fs != null) {
+      fs.close();
+    }
+  }
+
+  /**
+   * Gets printing stream.
+   * @return print stream
+   */
+  PrintStream getPrintStream() {
+    return ps;
   }
 
   /**
@@ -233,16 +268,33 @@ public abstract class Command extends Configured {
     if ((listArg == null) || listArg.isEmpty()) {
       return resultSet;
     }
+
     if (listArg.startsWith("file://")) {
       listURL = new URL(listArg);
-      byte[] data = Files.readAllBytes(Paths.get(listURL.getPath()));
-      nodeData = new String(data, Charset.forName("UTF-8"));
+      try {
+        HostsFileReader.readFileToSet("include",
+            Paths.get(listURL.getPath()).toString(), resultSet);
+      } catch (FileNotFoundException e) {
+        String warnMsg = String
+            .format("The input host file path '%s' is not a valid path. "
+                + "Please make sure the host file exists.", listArg);
+        throw new DiskBalancerException(warnMsg,
+            DiskBalancerException.Result.INVALID_HOST_FILE_PATH);
+      }
     } else {
       nodeData = listArg;
+      String[] nodes = nodeData.split(",");
+
+      if (nodes.length == 0) {
+        String warnMsg = "The number of input nodes is 0. "
+            + "Please input the valid nodes.";
+        throw new DiskBalancerException(warnMsg,
+            DiskBalancerException.Result.INVALID_NODE);
+      }
+
+      Collections.addAll(resultSet, nodes);
     }
 
-    String[] nodes = nodeData.split(",");
-    Collections.addAll(resultSet, nodes);
     return resultSet;
   }
 
@@ -423,7 +475,8 @@ public abstract class Command extends Configured {
    *
    * @return Cluster.
    */
-  protected DiskBalancerCluster getCluster() {
+  @VisibleForTesting
+  DiskBalancerCluster getCluster() {
     return cluster;
   }
 
@@ -438,7 +491,7 @@ public abstract class Command extends Configured {
   /**
    * Put output line to log and string buffer.
    * */
-  protected void recordOutput(final StrBuilder result,
+  protected void recordOutput(final TextStringBuilder result,
       final String outputLine) {
     LOG.info(outputLine);
     result.appendln(outputLine);
@@ -448,7 +501,8 @@ public abstract class Command extends Configured {
    * Parse top number of nodes to be processed.
    * @return top number of nodes to be processed.
    */
-  protected int parseTopNodes(final CommandLine cmd, final StrBuilder result) {
+  protected int parseTopNodes(final CommandLine cmd, final TextStringBuilder result)
+      throws IllegalArgumentException {
     String outputLine = "";
     int nodes = 0;
     final String topVal = cmd.getOptionValue(DiskBalancerCLI.TOP);
@@ -469,6 +523,10 @@ public abstract class Command extends Configured {
         LOG.info(outputLine);
         result.appendln(outputLine);
         nodes = getDefaultTop();
+      }
+      if (nodes <= 0) {
+        throw new IllegalArgumentException(
+            "Top limit input should be a positive numeric value");
       }
     }
 

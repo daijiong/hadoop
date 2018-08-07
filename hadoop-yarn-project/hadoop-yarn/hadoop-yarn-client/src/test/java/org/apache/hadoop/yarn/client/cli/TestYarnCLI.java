@@ -36,21 +36,28 @@ import java.io.PrintStream;
 import java.io.PrintWriter;
 import java.io.UnsupportedEncodingException;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.Date;
 import java.util.EnumSet;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 import java.util.regex.Pattern;
 
 import org.apache.commons.cli.Options;
-import org.apache.commons.lang.time.DateFormatUtils;
+import org.apache.commons.lang3.time.DateFormatUtils;
 import org.apache.hadoop.conf.Configuration;
+import org.apache.hadoop.yarn.api.protocolrecords.UpdateApplicationTimeoutsRequest;
+import org.apache.hadoop.yarn.api.protocolrecords.UpdateApplicationTimeoutsResponse;
 import org.apache.hadoop.yarn.api.records.ApplicationAttemptId;
 import org.apache.hadoop.yarn.api.records.ApplicationAttemptReport;
 import org.apache.hadoop.yarn.api.records.ApplicationId;
 import org.apache.hadoop.yarn.api.records.ApplicationReport;
 import org.apache.hadoop.yarn.api.records.ApplicationResourceUsageReport;
+import org.apache.hadoop.yarn.api.records.ApplicationTimeout;
+import org.apache.hadoop.yarn.api.records.ApplicationTimeoutType;
 import org.apache.hadoop.yarn.api.records.ContainerId;
 import org.apache.hadoop.yarn.api.records.ContainerReport;
 import org.apache.hadoop.yarn.api.records.ContainerState;
@@ -64,6 +71,7 @@ import org.apache.hadoop.yarn.api.records.Priority;
 import org.apache.hadoop.yarn.api.records.QueueInfo;
 import org.apache.hadoop.yarn.api.records.QueueState;
 import org.apache.hadoop.yarn.api.records.Resource;
+import org.apache.hadoop.yarn.api.records.ResourceInformation;
 import org.apache.hadoop.yarn.api.records.ResourceUtilization;
 import org.apache.hadoop.yarn.api.records.SignalContainerCommand;
 import org.apache.hadoop.yarn.api.records.YarnApplicationAttemptState;
@@ -80,10 +88,11 @@ import org.apache.hadoop.yarn.server.resourcemanager.scheduler.capacity.Capacity
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.capacity.CapacitySchedulerConfiguration;
 import org.apache.hadoop.yarn.util.Records;
 import org.apache.hadoop.yarn.util.Times;
+import static org.apache.hadoop.yarn.server.resourcemanager.scheduler.capacity.CapacitySchedulerConfiguration.PREFIX;
 import org.junit.Assert;
 import org.junit.Before;
 import org.junit.Test;
-import org.mortbay.log.Log;
+import org.eclipse.jetty.util.log.Log;
 
 import com.google.common.collect.ImmutableSet;
 import com.google.common.collect.Sets;
@@ -112,17 +121,31 @@ public class TestYarnCLI {
     for (int i = 0; i < 2; ++i) {
       ApplicationCLI cli = createAndGetAppCLI();
       ApplicationId applicationId = ApplicationId.newInstance(1234, 5);
+      Map<String, Long> resourceSecondsMap = new HashMap<>();
+      Map<String, Long> preemptedResoureSecondsMap = new HashMap<>();
+      resourceSecondsMap.put(ResourceInformation.MEMORY_MB.getName(), 123456L);
+      resourceSecondsMap.put(ResourceInformation.VCORES.getName(), 4567L);
+      preemptedResoureSecondsMap
+          .put(ResourceInformation.MEMORY_MB.getName(), 1111L);
+      preemptedResoureSecondsMap
+          .put(ResourceInformation.VCORES.getName(), 2222L);
       ApplicationResourceUsageReport usageReport = i == 0 ? null :
-          ApplicationResourceUsageReport.newInstance(
-              2, 0, null, null, null, 123456, 4567, 0, 0);
+          ApplicationResourceUsageReport
+              .newInstance(2, 0, null, null, null, resourceSecondsMap, 0, 0,
+                  preemptedResoureSecondsMap);
       ApplicationReport newApplicationReport = ApplicationReport.newInstance(
           applicationId, ApplicationAttemptId.newInstance(applicationId, 1),
           "user", "queue", "appname", "host", 124, null,
-          YarnApplicationState.FINISHED, "diagnostics", "url", 0, 0,
+          YarnApplicationState.FINISHED, "diagnostics", "url", 0, 0, 0,
           FinalApplicationStatus.SUCCEEDED, usageReport, "N/A", 0.53789f, "YARN",
           null, null, false, Priority.newInstance(0), "high-mem", "high-mem");
       newApplicationReport.setLogAggregationStatus(LogAggregationStatus.SUCCEEDED);
       newApplicationReport.setPriority(Priority.newInstance(0));
+      ApplicationTimeout timeout = ApplicationTimeout
+          .newInstance(ApplicationTimeoutType.LIFETIME, "UNLIMITED", -1);
+      newApplicationReport.setApplicationTimeouts(
+          Collections.singletonMap(timeout.getTimeoutType(), timeout));
+
       when(client.getApplicationReport(any(ApplicationId.class))).thenReturn(
           newApplicationReport);
       int result = cli.run(new String[] { "application", "-status", applicationId.toString() });
@@ -147,11 +170,17 @@ public class TestYarnCLI {
       pw.println("\tAM Host : host");
       pw.println("\tAggregate Resource Allocation : " +
           (i == 0 ? "N/A" : "123456 MB-seconds, 4567 vcore-seconds"));
+      pw.println("\tAggregate Resource Preempted : " +
+          (i == 0 ? "N/A" : "1111 MB-seconds, 2222 vcore-seconds"));
       pw.println("\tLog Aggregation Status : SUCCEEDED");
       pw.println("\tDiagnostics : diagnostics");
       pw.println("\tUnmanaged Application : false");
       pw.println("\tApplication Node Label Expression : high-mem");
       pw.println("\tAM container Node Label Expression : high-mem");
+      pw.print("\tTimeoutType : LIFETIME");
+      pw.print("\tExpiryTime : UNLIMITED");
+      pw.println("\tRemainingTime : -1seconds");
+      pw.println();
       pw.close();
       String appReportStr = baos.toString("UTF-8");
       Assert.assertEquals(appReportStr, sysOutStream.toString());
@@ -324,11 +353,11 @@ public class TestYarnCLI {
         "http://host:2345", "");
     pw.close();
     String appReportStr = baos.toString("UTF-8");
-    Log.info("ExpectedOutput");
-    Log.info("["+appReportStr+"]");
-    Log.info("OutputFrom command");
+    Log.getLog().info("ExpectedOutput");
+    Log.getLog().info("["+appReportStr+"]");
+    Log.getLog().info("OutputFrom command");
     String actualOutput = sysOutStream.toString("UTF-8");
-    Log.info("["+actualOutput+"]");
+    Log.getLog().info("["+actualOutput+"]");
     Assert.assertEquals(appReportStr, actualOutput);
   }
   
@@ -354,7 +383,7 @@ public class TestYarnCLI {
     ApplicationReport newApplicationReport = ApplicationReport.newInstance(
         applicationId, ApplicationAttemptId.newInstance(applicationId, 1),
         "user", "queue", "appname", "host", 124, null,
-        YarnApplicationState.RUNNING, "diagnostics", "url", 0, 0,
+        YarnApplicationState.RUNNING, "diagnostics", "url", 0, 0, 0,
         FinalApplicationStatus.SUCCEEDED, null, "N/A", 0.53789f, "YARN", null,
         Sets.newHashSet("tag1", "tag3"), false, Priority.UNDEFINED, "", "");
     List<ApplicationReport> applicationReports =
@@ -365,7 +394,7 @@ public class TestYarnCLI {
     ApplicationReport newApplicationReport2 = ApplicationReport.newInstance(
         applicationId2, ApplicationAttemptId.newInstance(applicationId2, 2),
         "user2", "queue2", "appname2", "host2", 125, null,
-        YarnApplicationState.FINISHED, "diagnostics2", "url2", 2, 2,
+        YarnApplicationState.FINISHED, "diagnostics2", "url2", 2, 2, 2,
         FinalApplicationStatus.SUCCEEDED, null, "N/A", 0.63789f, "NON-YARN", 
         null, Sets.newHashSet("tag2", "tag3"), false, Priority.UNDEFINED,
         "", "");
@@ -375,7 +404,7 @@ public class TestYarnCLI {
     ApplicationReport newApplicationReport3 = ApplicationReport.newInstance(
         applicationId3, ApplicationAttemptId.newInstance(applicationId3, 3),
         "user3", "queue3", "appname3", "host3", 126, null,
-        YarnApplicationState.RUNNING, "diagnostics3", "url3", 3, 3,
+        YarnApplicationState.RUNNING, "diagnostics3", "url3", 3, 3, 3,
         FinalApplicationStatus.SUCCEEDED, null, "N/A", 0.73789f, "MAPREDUCE", 
         null, Sets.newHashSet("tag1", "tag4"), false, Priority.UNDEFINED,
         "", "");
@@ -385,7 +414,7 @@ public class TestYarnCLI {
     ApplicationReport newApplicationReport4 = ApplicationReport.newInstance(
         applicationId4, ApplicationAttemptId.newInstance(applicationId4, 4),
         "user4", "queue4", "appname4", "host4", 127, null,
-        YarnApplicationState.FAILED, "diagnostics4", "url4", 4, 4,
+        YarnApplicationState.FAILED, "diagnostics4", "url4", 4, 4, 4,
         FinalApplicationStatus.SUCCEEDED, null, "N/A", 0.83789f,
         "NON-MAPREDUCE", null, Sets.newHashSet("tag1"), false,
         Priority.UNDEFINED, "", "");
@@ -395,7 +424,7 @@ public class TestYarnCLI {
     ApplicationReport newApplicationReport5 = ApplicationReport.newInstance(
         applicationId5, ApplicationAttemptId.newInstance(applicationId5, 5),
         "user5", "queue5", "appname5", "host5", 128, null,
-        YarnApplicationState.ACCEPTED, "diagnostics5", "url5", 5, 5,
+        YarnApplicationState.ACCEPTED, "diagnostics5", "url5", 5, 5, 5,
         FinalApplicationStatus.KILLED, null, "N/A", 0.93789f, "HIVE", null,
         Sets.newHashSet("tag2", "tag4"), false, Priority.UNDEFINED, "", "");
     applicationReports.add(newApplicationReport5);
@@ -404,7 +433,7 @@ public class TestYarnCLI {
     ApplicationReport newApplicationReport6 = ApplicationReport.newInstance(
         applicationId6, ApplicationAttemptId.newInstance(applicationId6, 6),
         "user6", "queue6", "appname6", "host6", 129, null,
-        YarnApplicationState.SUBMITTED, "diagnostics6", "url6", 6, 6,
+        YarnApplicationState.SUBMITTED, "diagnostics6", "url6", 6, 6, 6,
         FinalApplicationStatus.KILLED, null, "N/A", 0.99789f, "PIG",
         null, new HashSet<String>(), false, Priority.UNDEFINED, "", "");
     applicationReports.add(newApplicationReport6);
@@ -978,7 +1007,7 @@ public class TestYarnCLI {
     ApplicationReport newApplicationReport2 = ApplicationReport.newInstance(
         applicationId, ApplicationAttemptId.newInstance(applicationId, 1),
         "user", "queue", "appname", "host", 124, null,
-        YarnApplicationState.FINISHED, "diagnostics", "url", 0, 0,
+        YarnApplicationState.FINISHED, "diagnostics", "url", 0, 0, 0,
         FinalApplicationStatus.SUCCEEDED, null, "N/A", 0.53789f, "YARN", null);
     when(client.getApplicationReport(any(ApplicationId.class))).thenReturn(
         newApplicationReport2);
@@ -991,7 +1020,7 @@ public class TestYarnCLI {
     ApplicationReport newApplicationReport = ApplicationReport.newInstance(
         applicationId, ApplicationAttemptId.newInstance(applicationId, 1),
         "user", "queue", "appname", "host", 124, null,
-        YarnApplicationState.RUNNING, "diagnostics", "url", 0, 0,
+        YarnApplicationState.RUNNING, "diagnostics", "url", 0, 0, 0,
         FinalApplicationStatus.SUCCEEDED, null, "N/A", 0.53789f, "YARN", null);
     when(client.getApplicationReport(any(ApplicationId.class))).thenReturn(
         newApplicationReport);
@@ -1030,12 +1059,12 @@ public class TestYarnCLI {
     ApplicationReport newApplicationReport1 = ApplicationReport.newInstance(
         applicationId1, ApplicationAttemptId.newInstance(applicationId1, 1),
         "user", "queue", "appname", "host", 124, null,
-        YarnApplicationState.FINISHED, "diagnostics", "url", 0, 0,
+        YarnApplicationState.FINISHED, "diagnostics", "url", 0, 0, 0,
         FinalApplicationStatus.SUCCEEDED, null, "N/A", 0.53789f, "YARN", null);
     ApplicationReport newApplicationReport2 = ApplicationReport.newInstance(
         applicationId2, ApplicationAttemptId.newInstance(applicationId2, 1),
         "user", "queue", "appname", "host", 124, null,
-        YarnApplicationState.FINISHED, "diagnostics", "url", 0, 0,
+        YarnApplicationState.FINISHED, "diagnostics", "url", 0, 0, 0,
         FinalApplicationStatus.SUCCEEDED, null, "N/A", 0.34344f, "YARN", null);
     when(client.getApplicationReport(applicationId1)).thenReturn(
         newApplicationReport1);
@@ -1055,12 +1084,12 @@ public class TestYarnCLI {
     ApplicationReport newApplicationReport3 = ApplicationReport.newInstance(
         applicationId1, ApplicationAttemptId.newInstance(applicationId1, 1),
         "user", "queue", "appname", "host", 124, null,
-        YarnApplicationState.RUNNING, "diagnostics", "url", 0, 0,
+        YarnApplicationState.RUNNING, "diagnostics", "url", 0, 0, 0,
         FinalApplicationStatus.SUCCEEDED, null, "N/A", 0.53789f, "YARN", null);
     ApplicationReport newApplicationReport4 = ApplicationReport.newInstance(
         applicationId2, ApplicationAttemptId.newInstance(applicationId2, 1),
         "user", "queue", "appname", "host", 124, null,
-        YarnApplicationState.RUNNING, "diagnostics", "url", 0, 0,
+        YarnApplicationState.RUNNING, "diagnostics", "url", 0, 0, 0,
         FinalApplicationStatus.SUCCEEDED, null, "N/A", 0.53345f, "YARN", null);
     when(client.getApplicationReport(applicationId1)).thenReturn(
         newApplicationReport3);
@@ -1098,7 +1127,7 @@ public class TestYarnCLI {
     ApplicationReport newApplicationReport5 = ApplicationReport.newInstance(
         applicationId1, ApplicationAttemptId.newInstance(applicationId1, 1),
         "user", "queue", "appname", "host", 124, null,
-        YarnApplicationState.RUNNING, "diagnostics", "url", 0, 0,
+        YarnApplicationState.RUNNING, "diagnostics", "url", 0, 0, 0,
         FinalApplicationStatus.SUCCEEDED, null, "N/A", 0.53345f, "YARN", null);
     when(client.getApplicationReport(applicationId1)).thenReturn(
         newApplicationReport5);
@@ -1125,12 +1154,12 @@ public class TestYarnCLI {
     ApplicationReport newApplicationReport5 = ApplicationReport.newInstance(
         applicationId1, ApplicationAttemptId.newInstance(applicationId1, 1),
         "user", "queue", "appname", "host", 124, null,
-        YarnApplicationState.FINISHED, "diagnostics", "url", 0, 0,
+        YarnApplicationState.FINISHED, "diagnostics", "url", 0, 0, 0,
         FinalApplicationStatus.SUCCEEDED, null, "N/A", 0.53789f, "YARN", null);
     ApplicationReport newApplicationReport6 = ApplicationReport.newInstance(
         applicationId2, ApplicationAttemptId.newInstance(applicationId2, 1),
         "user", "queue", "appname", "host", 124, null,
-        YarnApplicationState.RUNNING, "diagnostics", "url", 0, 0,
+        YarnApplicationState.RUNNING, "diagnostics", "url", 0, 0, 0,
         FinalApplicationStatus.SUCCEEDED, null, "N/A", 0.53345f, "YARN", null);
     when(client.getApplicationReport(applicationId1)).thenReturn(
         newApplicationReport5);
@@ -1153,7 +1182,7 @@ public class TestYarnCLI {
     ApplicationReport newApplicationReport2 = ApplicationReport.newInstance(
         applicationId, ApplicationAttemptId.newInstance(applicationId, 1),
         "user", "queue", "appname", "host", 124, null,
-        YarnApplicationState.FINISHED, "diagnostics", "url", 0, 0,
+        YarnApplicationState.FINISHED, "diagnostics", "url", 0, 0, 0,
         FinalApplicationStatus.SUCCEEDED, null, "N/A", 0.53789f, "YARN", null);
     when(client.getApplicationReport(any(ApplicationId.class))).thenReturn(
         newApplicationReport2);
@@ -1168,7 +1197,7 @@ public class TestYarnCLI {
     ApplicationReport newApplicationReport = ApplicationReport.newInstance(
         applicationId, ApplicationAttemptId.newInstance(applicationId, 1),
         "user", "queue", "appname", "host", 124, null,
-        YarnApplicationState.RUNNING, "diagnostics", "url", 0, 0,
+        YarnApplicationState.RUNNING, "diagnostics", "url", 0, 0, 0,
         FinalApplicationStatus.SUCCEEDED, null, "N/A", 0.53789f, "YARN", null);
     when(client.getApplicationReport(any(ApplicationId.class))).thenReturn(
         newApplicationReport);
@@ -1192,6 +1221,59 @@ public class TestYarnCLI {
       Assert.assertTrue(ex instanceof ApplicationNotFoundException);
       Assert.assertEquals("Application with id '" + applicationId +
           "' doesn't exist in RM.", ex.getMessage());
+    }
+  }
+
+  @Test
+  public void testMoveApplicationAcrossQueuesWithNewCommand() throws Exception {
+    ApplicationCLI cli = createAndGetAppCLI();
+    ApplicationId applicationId = ApplicationId.newInstance(1234, 5);
+
+    ApplicationReport newApplicationReport2 = ApplicationReport.newInstance(
+        applicationId, ApplicationAttemptId.newInstance(applicationId, 1),
+        "user", "queue", "appname", "host", 124, null,
+        YarnApplicationState.FINISHED, "diagnostics", "url", 0, 0, 0,
+        FinalApplicationStatus.SUCCEEDED, null, "N/A", 0.53789f, "YARN", null);
+    when(client.getApplicationReport(any(ApplicationId.class)))
+        .thenReturn(newApplicationReport2);
+    int result = cli.run(new String[]{"application", "-appId",
+        applicationId.toString(), "-changeQueue", "targetqueue"});
+    assertEquals(0, result);
+    verify(client, times(0)).moveApplicationAcrossQueues(
+        any(ApplicationId.class), any(String.class));
+    verify(sysOut)
+        .println("Application " + applicationId + " has already finished ");
+
+    ApplicationReport newApplicationReport = ApplicationReport.newInstance(
+        applicationId, ApplicationAttemptId.newInstance(applicationId, 1),
+        "user", "queue", "appname", "host", 124, null,
+        YarnApplicationState.RUNNING, "diagnostics", "url", 0, 0, 0,
+        FinalApplicationStatus.SUCCEEDED, null, "N/A", 0.53789f, "YARN", null);
+    when(client.getApplicationReport(any(ApplicationId.class)))
+        .thenReturn(newApplicationReport);
+    result = cli.run(new String[]{"application", "-appId",
+        applicationId.toString(), "-changeQueue", "targetqueue"});
+    assertEquals(0, result);
+    verify(client).moveApplicationAcrossQueues(any(ApplicationId.class),
+        any(String.class));
+    verify(sysOut).println(
+        "Moving application application_1234_0005 to queue targetqueue");
+    verify(sysOut).println("Successfully completed move.");
+
+    doThrow(new ApplicationNotFoundException(
+        "Application with id '" + applicationId + "' doesn't exist in RM."))
+            .when(client)
+            .moveApplicationAcrossQueues(applicationId, "targetqueue");
+    cli = createAndGetAppCLI();
+    try {
+      result = cli.run(new String[]{"application", "-appId",
+          applicationId.toString(), "-changeQueue", "targetqueue"});
+      Assert.fail();
+    } catch (Exception ex) {
+      Assert.assertTrue(ex instanceof ApplicationNotFoundException);
+      Assert.assertEquals(
+          "Application with id '" + applicationId + "' doesn't exist in RM.",
+          ex.getMessage());
     }
   }
 
@@ -1630,7 +1712,8 @@ public class TestYarnCLI {
     nodeLabels.add("GPU");
     nodeLabels.add("JDK_7");
     QueueInfo queueInfo = QueueInfo.newInstance("queueA", 0.4f, 0.8f, 0.5f,
-        null, null, QueueState.RUNNING, nodeLabels, "GPU", null, false);
+        null, null, QueueState.RUNNING, nodeLabels, "GPU", null, false, null,
+        false);
     when(client.getQueueInfo(any(String.class))).thenReturn(queueInfo);
     int result = cli.run(new String[] { "-status", "queueA" });
     assertEquals(0, result);
@@ -1646,9 +1729,80 @@ public class TestYarnCLI {
     pw.println("\tDefault Node Label expression : " + "GPU");
     pw.println("\tAccessible Node Labels : " + "JDK_7,GPU");
     pw.println("\tPreemption : " + "enabled");
+    pw.println("\tIntra-queue Preemption : " + "enabled");
     pw.close();
     String queueInfoStr = baos.toString("UTF-8");
     Assert.assertEquals(queueInfoStr, sysOutStream.toString());
+  }
+
+  @Test
+  public void testGetQueueInfoOverrideIntraQueuePreemption() throws Exception {
+    CapacitySchedulerConfiguration conf = new CapacitySchedulerConfiguration();
+    ReservationSystemTestUtil.setupQueueConfiguration(conf);
+    conf.setClass(YarnConfiguration.RM_SCHEDULER, CapacityScheduler.class,
+        ResourceScheduler.class);
+    conf.setBoolean(YarnConfiguration.RM_SCHEDULER_ENABLE_MONITORS, true);
+    conf.set(YarnConfiguration.RM_SCHEDULER_MONITOR_POLICIES,
+        "org.apache.hadoop.yarn.server.resourcemanager.monitor.capacity."
+        + "ProportionalCapacityPreemptionPolicy");
+    // Turn on cluster-wide intra-queue preemption
+    conf.setBoolean(
+        CapacitySchedulerConfiguration.INTRAQUEUE_PREEMPTION_ENABLED, true);
+    // Disable intra-queue preemption for all queues
+    conf.setBoolean(CapacitySchedulerConfiguration.PREFIX
+        + "root.intra-queue-preemption.disable_preemption", true);
+    // Enable intra-queue preemption for the a1 queue
+    conf.setBoolean(CapacitySchedulerConfiguration.PREFIX
+        + "root.a.a1.intra-queue-preemption.disable_preemption", false);
+    MiniYARNCluster cluster =
+        new MiniYARNCluster("testGetQueueInfoOverrideIntraQueuePreemption",
+            2, 1, 1);
+
+    YarnClient yarnClient = null;
+    try {
+      cluster.init(conf);
+      cluster.start();
+      final Configuration yarnConf = cluster.getConfig();
+      yarnClient = YarnClient.createYarnClient();
+      yarnClient.init(yarnConf);
+      yarnClient.start();
+
+      QueueCLI cli = new QueueCLI();
+      cli.setClient(yarnClient);
+      cli.setSysOutPrintStream(sysOut);
+      cli.setSysErrPrintStream(sysErr);
+      sysOutStream.reset();
+      // Get status for the root.a queue
+      int result = cli.run(new String[] { "-status", "a" });
+      assertEquals(0, result);
+      String queueStatusOut = sysOutStream.toString();
+      Assert.assertTrue(queueStatusOut
+          .contains("\tPreemption : enabled"));
+      // In-queue preemption is disabled at the "root.a" queue level
+      Assert.assertTrue(queueStatusOut
+          .contains("Intra-queue Preemption : disabled"));
+      cli = new QueueCLI();
+      cli.setClient(yarnClient);
+      cli.setSysOutPrintStream(sysOut);
+      cli.setSysErrPrintStream(sysErr);
+      sysOutStream.reset();
+      // Get status for the root.a.a1 queue
+      result = cli.run(new String[] { "-status", "a1" });
+      assertEquals(0, result);
+      queueStatusOut = sysOutStream.toString();
+      Assert.assertTrue(queueStatusOut
+          .contains("\tPreemption : enabled"));
+      // In-queue preemption is enabled at the "root.a.a1" queue level
+      Assert.assertTrue(queueStatusOut
+          .contains("Intra-queue Preemption : enabled"));
+    } finally {
+      // clean-up
+      if (yarnClient != null) {
+        yarnClient.stop();
+      }
+      cluster.stop();
+      cluster.close();
+    }
   }
 
   @Test
@@ -1661,9 +1815,10 @@ public class TestYarnCLI {
     conf.set(YarnConfiguration.RM_SCHEDULER_MONITOR_POLICIES,
         "org.apache.hadoop.yarn.server.resourcemanager.monitor.capacity."
         + "ProportionalCapacityPreemptionPolicy");
-    conf.setBoolean(YarnConfiguration.RM_SCHEDULER_ENABLE_MONITORS, true);
+    conf.setBoolean(
+        CapacitySchedulerConfiguration.INTRAQUEUE_PREEMPTION_ENABLED, true);
     MiniYARNCluster cluster =
-        new MiniYARNCluster("testReservationAPIs", 2, 1, 1);
+        new MiniYARNCluster("testGetQueueInfoPreemptionEnabled", 2, 1, 1);
 
     YarnClient yarnClient = null;
     try {
@@ -1681,8 +1836,11 @@ public class TestYarnCLI {
       sysOutStream.reset();
       int result = cli.run(new String[] { "-status", "a1" });
       assertEquals(0, result);
-      Assert.assertTrue(sysOutStream.toString()
-          .contains("Preemption : enabled"));
+      String queueStatusOut = sysOutStream.toString();
+      Assert.assertTrue(queueStatusOut
+          .contains("\tPreemption : enabled"));
+      Assert.assertTrue(queueStatusOut
+          .contains("Intra-queue Preemption : enabled"));
     } finally {
       // clean-up
       if (yarnClient != null) {
@@ -1704,17 +1862,14 @@ public class TestYarnCLI {
         "org.apache.hadoop.yarn.server.resourcemanager.monitor.capacity."
         + "ProportionalCapacityPreemptionPolicy");
     conf.setBoolean(YarnConfiguration.RM_SCHEDULER_ENABLE_MONITORS, true);
-    conf.setBoolean(
-        "yarn.scheduler.capacity.root.a.a1.disable_preemption", true);
-    MiniYARNCluster cluster =
-        new MiniYARNCluster("testReservationAPIs", 2, 1, 1);
+    conf.setBoolean(PREFIX + "root.a.a1.disable_preemption", true);
 
-    YarnClient yarnClient = null;
-    try {
+    try (MiniYARNCluster cluster =
+        new MiniYARNCluster("testReservationAPIs", 2, 1, 1);
+         YarnClient yarnClient = YarnClient.createYarnClient()) {
       cluster.init(conf);
       cluster.start();
       final Configuration yarnConf = cluster.getConfig();
-      yarnClient = YarnClient.createYarnClient();
       yarnClient.init(yarnConf);
       yarnClient.start();
 
@@ -1725,15 +1880,11 @@ public class TestYarnCLI {
       sysOutStream.reset();
       int result = cli.run(new String[] { "-status", "a1" });
       assertEquals(0, result);
-      Assert.assertTrue(sysOutStream.toString()
-          .contains("Preemption : disabled"));
-    } finally {
-      // clean-up
-      if (yarnClient != null) {
-        yarnClient.stop();
-      }
-      cluster.stop();
-      cluster.close();
+      String queueStatusOut = sysOutStream.toString();
+      Assert.assertTrue(queueStatusOut
+          .contains("\tPreemption : disabled"));
+      Assert.assertTrue(queueStatusOut
+          .contains("Intra-queue Preemption : disabled"));
     }
   }
   
@@ -1741,7 +1892,7 @@ public class TestYarnCLI {
   public void testGetQueueInfoWithEmptyNodeLabel() throws Exception {
     QueueCLI cli = createAndGetQueueCLI();
     QueueInfo queueInfo = QueueInfo.newInstance("queueA", 0.4f, 0.8f, 0.5f,
-        null, null, QueueState.RUNNING, null, null, null, true);
+        null, null, QueueState.RUNNING, null, null, null, true, null, true);
     when(client.getQueueInfo(any(String.class))).thenReturn(queueInfo);
     int result = cli.run(new String[] { "-status", "queueA" });
     assertEquals(0, result);
@@ -1758,6 +1909,7 @@ public class TestYarnCLI {
         + NodeLabel.DEFAULT_NODE_LABEL_PARTITION);
     pw.println("\tAccessible Node Labels : ");
     pw.println("\tPreemption : " + "disabled");
+    pw.println("\tIntra-queue Preemption : " + "disabled");
     pw.close();
     String queueInfoStr = baos.toString("UTF-8");
     Assert.assertEquals(queueInfoStr, sysOutStream.toString());
@@ -1863,7 +2015,7 @@ public class TestYarnCLI {
         ApplicationReport.newInstance(applicationId,
             ApplicationAttemptId.newInstance(applicationId, 1), "user",
             "queue", "appname", "host", 124, null,
-            YarnApplicationState.RUNNING, "diagnostics", "url", 0, 0,
+            YarnApplicationState.RUNNING, "diagnostics", "url", 0, 0, 0,
             FinalApplicationStatus.UNDEFINED, null, "N/A", 0.53789f, "YARN",
             null);
     when(client.getApplicationReport(any(ApplicationId.class))).thenReturn(
@@ -1920,7 +2072,7 @@ public class TestYarnCLI {
       NodeReport nodeReport = NodeReport.newInstance(NodeId
         .newInstance("host" + i, 0), state, "host" + 1 + ":8888",
           "rack1", Records.newRecord(Resource.class), Records
-              .newRecord(Resource.class), 0, "", 0, nodeLabels);
+              .newRecord(Resource.class), 0, "", 0, nodeLabels, null, null);
       if (!emptyResourceUtilization) {
         ResourceUtilization containersUtilization = ResourceUtilization
             .newInstance(1024, 2048, 4);
@@ -1953,38 +2105,157 @@ public class TestYarnCLI {
     ByteArrayOutputStream baos = new ByteArrayOutputStream();
     PrintWriter pw = new PrintWriter(baos);
     pw.println("usage: application");
-    pw.println(" -appId <Application ID>         Specify Application Id to be operated");
-    pw.println(" -appStates <States>             Works with -list to filter applications");
-    pw.println("                                 based on input comma-separated list of");
-    pw.println("                                 application states. The valid application");
-    pw.println("                                 state can be one of the following:");
-    pw.println("                                 ALL,NEW,NEW_SAVING,SUBMITTED,ACCEPTED,RUN");
-    pw.println("                                 NING,FINISHED,FAILED,KILLED");
-    pw.println(" -appTags <Tags>                 Works with -list to filter applications");
-    pw.println("                                 based on input comma-separated list of");
-    pw.println("                                 application tags.");
-    pw.println(" -appTypes <Types>               Works with -list to filter applications");
-    pw.println("                                 based on input comma-separated list of");
-    pw.println("                                 application types.");
-    pw.println(" -help                           Displays help for all commands.");
-    pw.println(" -kill <Application ID>          Kills the application. Set of");
-    pw.println("                                 applications can be provided separated");
-    pw.println("                                 with space");
-    pw.println(" -list                           List applications. Supports optional use");
-    pw.println("                                 of -appTypes to filter applications based");
-    pw.println("                                 on application type, -appStates to filter");
-    pw.println("                                 applications based on application state");
-    pw.println("                                 and -appTags to filter applications based");
-    pw.println("                                 on application tag.");
-    pw.println(" -movetoqueue <Application ID>   Moves the application to a different");
-    pw.println("                                 queue.");
-    pw.println(" -queue <Queue Name>             Works with the movetoqueue command to");
-    pw.println("                                 specify which queue to move an");
-    pw.println("                                 application to.");
-    pw.println(" -status <Application ID>        Prints the status of the application.");
-    pw.println(" -updatePriority <Priority>      update priority of an application.");
-    pw.println("                                 ApplicationId can be passed using 'appId'");
-    pw.println("                                 option.");
+    pw.println(" -appId <Application ID>                  Specify Application Id to be");
+    pw.println("                                          operated");
+    pw.println(" -appStates <States>                      Works with -list to filter");
+    pw.println("                                          applications based on input");
+    pw.println("                                          comma-separated list of");
+    pw.println("                                          application states. The valid");
+    pw.println("                                          application state can be one of");
+    pw.println("                                          the following:");
+    pw.println("                                          ALL,NEW,NEW_SAVING,SUBMITTED,ACC");
+    pw.println("                                          EPTED,RUNNING,FINISHED,FAILED,KI");
+    pw.println("                                          LLED");
+    pw.println(" -appTags <Tags>                          Works with -list to filter");
+    pw.println("                                          applications based on input");
+    pw.println("                                          comma-separated list of");
+    pw.println("                                          application tags.");
+    pw.println(" -appTypes <Types>                        Works with -list to filter");
+    pw.println("                                          applications based on input");
+    pw.println("                                          comma-separated list of");
+    pw.println("                                          application types.");
+    pw.println(" -autoFinalize                            Works with -upgrade and");
+    pw.println("                                          -initiate options to initiate");
+    pw.println("                                          the upgrade of the application");
+    pw.println("                                          with the ability to finalize the");
+    pw.println("                                          upgrade automatically.");
+    pw.println(" -changeQueue <Queue Name>                Moves application to a new");
+    pw.println("                                          queue. ApplicationId can be");
+    pw.println("                                          passed using 'appId' option.");
+    pw.println("                                          'movetoqueue' command is");
+    pw.println("                                          deprecated, this new command");
+    pw.println("                                          'changeQueue' performs same");
+    pw.println("                                          functionality.");
+    pw.println(" -component <Component Name> <Count>      Works with -flex option to");
+    pw.println("                                          change the number of");
+    pw.println("                                          components/containers running");
+    pw.println("                                          for an application /");
+    pw.println("                                          long-running service. Supports");
+    pw.println("                                          absolute or relative changes,");
+    pw.println("                                          such as +1, 2, or -3.");
+    pw.println(" -components <Components>                 Works with -upgrade option to");
+    pw.println("                                          trigger the upgrade of specified");
+    pw.println("                                          components of the application.");
+    pw.println(" -destroy <Application Name>              Destroys a saved application");
+    pw.println("                                          specification and removes all");
+    pw.println("                                          application data permanently.");
+    pw.println("                                          Supports -appTypes option to");
+    pw.println("                                          specify which client");
+    pw.println("                                          implementation to use.");
+    pw.println(" -enableFastLaunch <Destination Folder>   Uploads AM dependencies to HDFS");
+    pw.println("                                          to make future launches faster.");
+    pw.println("                                          Supports -appTypes option to");
+    pw.println("                                          specify which client");
+    pw.println("                                          implementation to use.");
+    pw.println("                                          Optionally a destination folder");
+    pw.println("                                          for the tarball can be");
+    pw.println("                                          specified.");
+    pw.println(" -finalize                                Works with -upgrade option to");
+    pw.println("                                          finalize the upgrade.");
+    pw.println(" -flex <Application Name or ID>           Changes number of running");
+    pw.println("                                          containers for a component of an");
+    pw.println("                                          application / long-running");
+    pw.println("                                          service. Requires -component");
+    pw.println("                                          option. If name is provided,");
+    pw.println("                                          appType must be provided unless");
+    pw.println("                                          it is the default yarn-service.");
+    pw.println("                                          If ID is provided, the appType");
+    pw.println("                                          will be looked up. Supports");
+    pw.println("                                          -appTypes option to specify");
+    pw.println("                                          which client implementation to");
+    pw.println("                                          use.");
+    pw.println(" -help                                    Displays help for all commands.");
+    pw.println(" -initiate <File Name>                    Works with -upgrade option to");
+    pw.println("                                          initiate the application");
+    pw.println("                                          upgrade. It requires the");
+    pw.println("                                          upgraded application");
+    pw.println("                                          specification file.");
+    pw.println(" -instances <Component Instances>         Works with -upgrade option to");
+    pw.println("                                          trigger the upgrade of specified");
+    pw.println("                                          component instances of the");
+    pw.println("                                          application.");
+    pw.println(" -kill <Application ID>                   Kills the application. Set of");
+    pw.println("                                          applications can be provided");
+    pw.println("                                          separated with space");
+    pw.println(" -launch <Application Name> <File Name>   Launches application from");
+    pw.println("                                          specification file (saves");
+    pw.println("                                          specification and starts");
+    pw.println("                                          application). Options");
+    pw.println("                                          -updateLifetime and -changeQueue");
+    pw.println("                                          can be specified to alter the");
+    pw.println("                                          values provided in the file.");
+    pw.println("                                          Supports -appTypes option to");
+    pw.println("                                          specify which client");
+    pw.println("                                          implementation to use.");
+    pw.println(" -list                                    List applications. Supports");
+    pw.println("                                          optional use of -appTypes to");
+    pw.println("                                          filter applications based on");
+    pw.println("                                          application type, -appStates to");
+    pw.println("                                          filter applications based on");
+    pw.println("                                          application state and -appTags");
+    pw.println("                                          to filter applications based on");
+    pw.println("                                          application tag.");
+    pw.println(" -movetoqueue <Application ID>            Moves the application to a");
+    pw.println("                                          different queue. Deprecated");
+    pw.println("                                          command. Use 'changeQueue'");
+    pw.println("                                          instead.");
+    pw.println(" -queue <Queue Name>                      Works with the movetoqueue");
+    pw.println("                                          command to specify which queue");
+    pw.println("                                          to move an application to.");
+    pw.println(" -save <Application Name> <File Name>     Saves specification file for an");
+    pw.println("                                          application. Options");
+    pw.println("                                          -updateLifetime and -changeQueue");
+    pw.println("                                          can be specified to alter the");
+    pw.println("                                          values provided in the file.");
+    pw.println("                                          Supports -appTypes option to");
+    pw.println("                                          specify which client");
+    pw.println("                                          implementation to use.");
+    pw.println(" -start <Application Name>                Starts a previously saved");
+    pw.println("                                          application. Supports -appTypes");
+    pw.println("                                          option to specify which client");
+    pw.println("                                          implementation to use.");
+    pw.println(" -status <Application Name or ID>         Prints the status of the");
+    pw.println("                                          application. If app ID is");
+    pw.println("                                          provided, it prints the generic");
+    pw.println("                                          YARN application status. If name");
+    pw.println("                                          is provided, it prints the");
+    pw.println("                                          application specific status");
+    pw.println("                                          based on app's own");
+    pw.println("                                          implementation, and -appTypes");
+    pw.println("                                          option must be specified unless");
+    pw.println("                                          it is the default yarn-service");
+    pw.println("                                          type.");
+    pw.println(" -stop <Application Name or ID>           Stops application gracefully");
+    pw.println("                                          (may be started again later). If");
+    pw.println("                                          name is provided, appType must");
+    pw.println("                                          be provided unless it is the");
+    pw.println("                                          default yarn-service. If ID is");
+    pw.println("                                          provided, the appType will be");
+    pw.println("                                          looked up. Supports -appTypes");
+    pw.println("                                          option to specify which client");
+    pw.println("                                          implementation to use.");
+    pw.println(" -updateLifetime <Timeout>                update timeout of an application");
+    pw.println("                                          from NOW. ApplicationId can be");
+    pw.println("                                          passed using 'appId' option.");
+    pw.println("                                          Timeout value is in seconds.");
+    pw.println(" -updatePriority <Priority>               update priority of an");
+    pw.println("                                          application. ApplicationId can");
+    pw.println("                                          be passed using 'appId' option.");
+    pw.println(" -upgrade <Application Name>              Upgrades an");
+    pw.println("                                          application/long-running");
+    pw.println("                                          service. It requires either");
+    pw.println("                                          -initiate, -instances, or");
+    pw.println("                                          -finalize options.");
     pw.close();
     String appsHelpStr = baos.toString("UTF-8");
     return appsHelpStr;
@@ -2009,13 +2280,17 @@ public class TestYarnCLI {
     ByteArrayOutputStream baos = new ByteArrayOutputStream();
     PrintWriter pw = new PrintWriter(baos);
     pw.println("usage: container");
+    pw.println(" -appTypes <Types>                Works with -list to specify the app type when application name is provided.");
+    pw.println(" -components <arg>                Works with -list to filter instances based on input comma-separated list of component names.");
     pw.println(" -help                            Displays help for all commands.");
-    pw.println(" -list <Application Attempt ID>   List containers for application attempt.");
+    pw.println(" -list <Application Name or Attempt ID>   List containers for application attempt  when application attempt ID is provided. When application name is provided, then it finds the instances of the application based on app's own implementation, and -appTypes option must be specified unless it is the default yarn-service type. With app name, it supports optional use of -version to filter instances based on app version, -components to filter instances based on component names, -states to filter instances based on instance state.");
     pw.println(" -signal <container ID [signal command]> Signal the container.");
     pw.println("The available signal commands are ");
     pw.println(java.util.Arrays.asList(SignalContainerCommand.values()));
     pw.println("                                 Default command is OUTPUT_THREAD_DUMP.");
+    pw.println(" -states <arg>                    Works with -list to filter instances based on input comma-separated list of instance states.");
     pw.println(" -status <Container ID>           Prints the status of the container.");
+    pw.println(" -version <arg>                   Works with -list to filter instances based on input application version. ");
     pw.close();
     try {
       return normalize(baos.toString("UTF-8"));
@@ -2071,5 +2346,28 @@ public class TestYarnCLI {
         cli.run(new String[] { "applicationattempt", "-list",
             applicationId.toString() });
     assertEquals(0, result);
+  }
+
+  @Test(timeout = 60000)
+  public void testUpdateApplicationTimeout() throws Exception {
+    ApplicationCLI cli = createAndGetAppCLI();
+    ApplicationId applicationId = ApplicationId.newInstance(1234, 6);
+
+    UpdateApplicationTimeoutsResponse response =
+        mock(UpdateApplicationTimeoutsResponse.class);
+    String formatISO8601 =
+        Times.formatISO8601(System.currentTimeMillis() + 5 * 1000);
+    when(response.getApplicationTimeouts()).thenReturn(Collections
+        .singletonMap(ApplicationTimeoutType.LIFETIME, formatISO8601));
+
+    when(client
+        .updateApplicationTimeouts(any(UpdateApplicationTimeoutsRequest.class)))
+            .thenReturn(response);
+
+    int result = cli.run(new String[] { "application", "-appId",
+        applicationId.toString(), "-updateLifetime", "10" });
+    Assert.assertEquals(result, 0);
+    verify(client)
+        .updateApplicationTimeouts(any(UpdateApplicationTimeoutsRequest.class));
   }
 }

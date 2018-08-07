@@ -41,7 +41,7 @@ import java.util.Iterator;
 import java.util.LinkedList;
 import java.util.List;
 
-import org.apache.commons.lang.time.DateUtils;
+import org.apache.commons.lang3.time.DateUtils;
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.conf.Configuration;
@@ -420,6 +420,9 @@ public class TestCacheDirectives {
         setMode(new FsPermission((short)0777)));
     proto.addCachePool(new CachePoolInfo("pool4").
         setMode(new FsPermission((short)0)));
+    proto.addCachePool(new CachePoolInfo("pool5").
+        setMode(new FsPermission((short)0007))
+        .setOwnerName(unprivilegedUser.getShortUserName()));
 
     CacheDirectiveInfo alpha = new CacheDirectiveInfo.Builder().
         setPath(new Path("/alpha")).
@@ -487,6 +490,18 @@ public class TestCacheDirectives {
     }
 
     long deltaId = addAsUnprivileged(delta);
+
+    try {
+      addAsUnprivileged(new CacheDirectiveInfo.Builder().
+          setPath(new Path("/epsilon")).
+          setPool("pool5").
+          build());
+      fail("expected an error when adding to a pool with " +
+          "mode 007 (no permissions for pool owner).");
+    } catch (AccessControlException e) {
+      GenericTestUtils.
+          assertExceptionContains("Permission denied while accessing pool", e);
+    }
 
     // We expect the following to succeed, because DistributedFileSystem
     // qualifies the path.

@@ -58,11 +58,11 @@ import org.apache.hadoop.hdfs.util.MD5FileUtils;
 import org.apache.hadoop.io.IOUtils;
 import org.apache.hadoop.test.GenericTestUtils;
 import org.apache.hadoop.test.GenericTestUtils.DelayAnswer;
+import org.apache.hadoop.test.Whitebox;
 import org.apache.log4j.Level;
 import org.junit.Assert;
 import org.junit.Test;
 import org.mockito.Mockito;
-import org.mockito.internal.util.reflection.Whitebox;
 import org.mockito.invocation.InvocationOnMock;
 import org.mockito.stubbing.Answer;
 
@@ -745,7 +745,7 @@ public class TestSaveNamespace {
 
   private void checkEditExists(FSNamesystem fsn, int id) throws IOException {
     // Make sure the image loaded including our edit.
-    assertNotNull(fsn.getFileInfo("/test" + id, false));
+    assertNotNull(fsn.getFileInfo("/test" + id, false, false, false));
   }
 
   private Configuration getConf() throws IOException {

@@ -84,6 +84,13 @@ public class DiskBalancerCLI extends Configured implements Tool {
    * Executes a given plan file on the target datanode.
    */
   public static final String EXECUTE = "execute";
+
+  /**
+   * Skips date check(now by default the plan is valid for 24 hours), and force
+   * execute the plan.
+   */
+  public static final String SKIPDATECHECK = "skipDateCheck";
+
   /**
    * The report command prints out a disk fragmentation report about the data
    * cluster. By default it prints the DEFAULT_TOP machines names with high
@@ -137,6 +144,8 @@ public class DiskBalancerCLI extends Configured implements Tool {
 
   private final PrintStream printStream;
 
+  private Command currentCommand = null;
+
   /**
    * Construct a DiskBalancer.
    *
@@ -163,7 +172,9 @@ public class DiskBalancerCLI extends Configured implements Tool {
     try {
       res = ToolRunner.run(shell, argv);
     } catch (Exception ex) {
-      LOG.error(ex.toString());
+      String msg = String.format("Exception thrown while running %s.",
+          DiskBalancerCLI.class.getSimpleName());
+      LOG.error(msg, ex);
       res = 1;
     }
     System.exit(res);
@@ -340,7 +351,15 @@ public class DiskBalancerCLI extends Configured implements Tool {
             "submits it for execution by the datanode.")
         .create();
     getExecuteOptions().addOption(execute);
+
+
+    Option skipDateCheck = OptionBuilder.withLongOpt(SKIPDATECHECK)
+        .withDescription("skips the date check and force execute the plan")
+        .create();
+    getExecuteOptions().addOption(skipDateCheck);
+
     opt.addOption(execute);
+    opt.addOption(skipDateCheck);
   }
 
   /**
@@ -432,6 +451,13 @@ public class DiskBalancerCLI extends Configured implements Tool {
   }
 
   /**
+   * Gets current command associated with this instance of DiskBalancer.
+   */
+  public Command getCurrentCommand() {
+    return currentCommand;
+  }
+
+  /**
    * Dispatches calls to the right command Handler classes.
    *
    * @param cmd  - CommandLine
@@ -440,38 +466,45 @@ public class DiskBalancerCLI extends Configured implements Tool {
    */
   private int dispatch(CommandLine cmd, Options opts)
       throws Exception {
-    Command currentCommand = null;
-    if (cmd.hasOption(DiskBalancerCLI.PLAN)) {
-      currentCommand = new PlanCommand(getConf());
-    }
+    Command dbCmd = null;
+    try {
+      if (cmd.hasOption(DiskBalancerCLI.PLAN)) {
+        dbCmd = new PlanCommand(getConf(), printStream);
+      }
 
-    if (cmd.hasOption(DiskBalancerCLI.EXECUTE)) {
-      currentCommand = new ExecuteCommand(getConf());
-    }
+      if (cmd.hasOption(DiskBalancerCLI.EXECUTE)) {
+        dbCmd = new ExecuteCommand(getConf());
+      }
 
-    if (cmd.hasOption(DiskBalancerCLI.QUERY)) {
-      currentCommand = new QueryCommand(getConf());
-    }
+      if (cmd.hasOption(DiskBalancerCLI.QUERY)) {
+        dbCmd = new QueryCommand(getConf());
+      }
 
-    if (cmd.hasOption(DiskBalancerCLI.CANCEL)) {
-      currentCommand = new CancelCommand(getConf());
-    }
+      if (cmd.hasOption(DiskBalancerCLI.CANCEL)) {
+        dbCmd = new CancelCommand(getConf());
+      }
 
-    if (cmd.hasOption(DiskBalancerCLI.REPORT)) {
-      currentCommand = new ReportCommand(getConf(), this.printStream);
-    }
+      if (cmd.hasOption(DiskBalancerCLI.REPORT)) {
+        dbCmd = new ReportCommand(getConf(), this.printStream);
+      }
 
-    if (cmd.hasOption(DiskBalancerCLI.HELP)) {
-      currentCommand = new HelpCommand(getConf());
-    }
+      if (cmd.hasOption(DiskBalancerCLI.HELP)) {
+        dbCmd = new HelpCommand(getConf());
+      }
 
-    // Invoke main help here.
-    if (currentCommand == null) {
-      new HelpCommand(getConf()).execute(null);
-      return 1;
-    }
+      // Invoke main help here.
+      if (dbCmd == null) {
+        dbCmd = new HelpCommand(getConf());
+        dbCmd.execute(null);
+        return 1;
+      }
 
-    currentCommand.execute(cmd);
-    return 0;
+      dbCmd.execute(cmd);
+      return 0;
+    } finally {
+      if (dbCmd != null) {
+        dbCmd.close();
+      }
+    }
   }
 }

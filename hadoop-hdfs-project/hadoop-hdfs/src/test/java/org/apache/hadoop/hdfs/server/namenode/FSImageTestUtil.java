@@ -42,7 +42,7 @@ import java.util.Map.Entry;
 import java.util.Properties;
 import java.util.Set;
 
-import org.apache.commons.lang.StringUtils;
+import org.apache.commons.lang3.StringUtils;
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.conf.Configuration;
@@ -108,6 +108,8 @@ public abstract class FSImageTestUtil {
       try {
         raf.seek(IMAGE_TXID_POS);
         raf.writeLong(0);
+        raf.close();
+        raf = null;
       } finally {
         IOUtils.closeStream(raf);
       }
@@ -542,9 +544,12 @@ public abstract class FSImageTestUtil {
       
       out = new FileOutputStream(versionFile);
       props.store(out, null);
+      out.close();
+      out = null;
       
     } finally {
-      IOUtils.cleanup(null, fis, out);
+      IOUtils.closeStream(fis);
+      IOUtils.closeStream(out);
     }    
   }
 

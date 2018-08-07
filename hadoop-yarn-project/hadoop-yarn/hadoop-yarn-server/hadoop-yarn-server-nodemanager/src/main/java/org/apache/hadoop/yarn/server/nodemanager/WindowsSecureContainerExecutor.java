@@ -35,7 +35,7 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
-import org.apache.commons.lang.StringUtils;
+import org.apache.commons.lang3.StringUtils;
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.conf.Configuration;
@@ -509,7 +509,7 @@ public class WindowsSecureContainerExecutor extends DefaultContainerExecutor {
               output.append(buf, 0, nRead);
             }
           } catch (Throwable t) {
-            LOG.error("Error occured reading the process stdout", t);
+            LOG.error("Error occurred reading the process stdout", t);
           }
         }
       };
@@ -702,7 +702,7 @@ public class WindowsSecureContainerExecutor extends DefaultContainerExecutor {
     command.addAll(ContainerLocalizer.getJavaOpts(getConf()));
 
     ContainerLocalizer.buildMainArgs(command, user, appId, locId, nmAddr,
-        localDirs);
+        localDirs, super.getConf());
 
     String cmdLine = StringUtils.join(command, " ");
 
@@ -722,7 +722,7 @@ public class WindowsSecureContainerExecutor extends DefaultContainerExecutor {
       }
       catch(Throwable e) {
         LOG.warn(String.format(
-            "An exception occured during the cleanup of localizer job %s:%n%s",
+            "An exception occurred during the cleanup of localizer job %s:%n%s",
             localizerPid,
             org.apache.hadoop.util.StringUtils.stringifyException(e)));
       }
@@ -732,7 +732,7 @@ public class WindowsSecureContainerExecutor extends DefaultContainerExecutor {
   @Override
   protected CommandExecutor buildCommandExecutor(String wrapperScriptPath,
       String containerIdStr, String userName, Path pidFile, Resource resource,
-      File wordDir, Map<String, String> environment) throws IOException {
+      File wordDir, Map<String, String> environment) {
      return new WintuilsProcessStubExecutor(
          wordDir.toString(),
          containerIdStr, userName, pidFile.toString(), 

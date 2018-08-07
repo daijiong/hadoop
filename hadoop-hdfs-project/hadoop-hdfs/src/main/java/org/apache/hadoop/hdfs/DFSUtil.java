@@ -31,17 +31,22 @@ import static org.apache.hadoop.hdfs.DFSConfigKeys.DFS_NAMENODE_LIFELINE_RPC_ADD
 import static org.apache.hadoop.hdfs.DFSConfigKeys.DFS_NAMENODE_RPC_ADDRESS_KEY;
 import static org.apache.hadoop.hdfs.DFSConfigKeys.DFS_NAMENODE_SECONDARY_HTTP_ADDRESS_KEY;
 import static org.apache.hadoop.hdfs.DFSConfigKeys.DFS_NAMENODE_SERVICE_RPC_ADDRESS_KEY;
+import static org.apache.hadoop.hdfs.DFSConfigKeys.DFS_NAMENODE_SHARED_EDITS_DIR_KEY;
 import static org.apache.hadoop.hdfs.DFSConfigKeys.DFS_NAMESERVICE_ID;
 import static org.apache.hadoop.hdfs.DFSConfigKeys.DFS_SERVER_HTTPS_KEYPASSWORD_KEY;
 import static org.apache.hadoop.hdfs.DFSConfigKeys.DFS_SERVER_HTTPS_KEYSTORE_PASSWORD_KEY;
 import static org.apache.hadoop.hdfs.DFSConfigKeys.DFS_SERVER_HTTPS_TRUSTSTORE_PASSWORD_KEY;
 
+import java.io.ByteArrayInputStream;
+import java.io.DataInputStream;
 import java.io.IOException;
 import java.io.PrintStream;
 import java.net.InetAddress;
 import java.net.InetSocketAddress;
 import java.net.URI;
 import java.net.URISyntaxException;
+import java.net.UnknownHostException;
+
 import java.security.SecureRandom;
 import java.util.Arrays;
 import java.util.Collection;
@@ -70,7 +75,9 @@ import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.hdfs.protocol.DatanodeInfo;
 import org.apache.hadoop.hdfs.protocol.HdfsConstants;
+import org.apache.hadoop.hdfs.security.token.delegation.DelegationTokenIdentifier;
 import org.apache.hadoop.hdfs.server.common.HdfsServerConstants;
+import org.apache.hadoop.hdfs.server.common.Util;
 import org.apache.hadoop.hdfs.server.namenode.NameNode;
 import org.apache.hadoop.http.HttpConfig;
 import org.apache.hadoop.http.HttpServer2;
@@ -80,6 +87,7 @@ import org.apache.hadoop.net.NetUtils;
 import org.apache.hadoop.security.SecurityUtil;
 import org.apache.hadoop.security.UserGroupInformation;
 import org.apache.hadoop.security.authorize.AccessControlList;
+import org.apache.hadoop.security.token.Token;
 import org.apache.hadoop.util.ToolRunner;
 
 import com.google.common.annotations.VisibleForTesting;
@@ -124,40 +132,10 @@ public class DFSUtil {
   }
 
   /**
-   * Compartor for sorting DataNodeInfo[] based on decommissioned states.
-   * Decommissioned nodes are moved to the end of the array on sorting with
-   * this compartor.
+   * Comparator for sorting DataNodeInfo[] based on
+   * decommissioned and entering_maintenance states.
    */
-  public static final Comparator<DatanodeInfo> DECOM_COMPARATOR = 
-    new Comparator<DatanodeInfo>() {
-      @Override
-      public int compare(DatanodeInfo a, DatanodeInfo b) {
-        return a.isDecommissioned() == b.isDecommissioned() ? 0 : 
-          a.isDecommissioned() ? 1 : -1;
-      }
-    };
-
-
-  /**
-   * Comparator for sorting DataNodeInfo[] based on decommissioned/stale states.
-   * Decommissioned/stale nodes are moved to the end of the array on sorting
-   * with this comparator.
-   */ 
-  @InterfaceAudience.Private 
-  public static class DecomStaleComparator implements Comparator<DatanodeInfo> {
-    private final long staleInterval;
-
-    /**
-     * Constructor of DecomStaleComparator
-     * 
-     * @param interval
-     *          The time interval for marking datanodes as stale is passed from
-     *          outside, since the interval may be changed dynamically
-     */
-    public DecomStaleComparator(long interval) {
-      this.staleInterval = interval;
-    }
-
+  public static class ServiceComparator implements Comparator<DatanodeInfo> {
     @Override
     public int compare(DatanodeInfo a, DatanodeInfo b) {
       // Decommissioned nodes will still be moved to the end of the list
@@ -166,6 +144,45 @@ public class DFSUtil {
       } else if (b.isDecommissioned()) {
         return -1;
       }
+
+      // ENTERING_MAINTENANCE nodes should be after live nodes.
+      if (a.isEnteringMaintenance()) {
+        return b.isEnteringMaintenance() ? 0 : 1;
+      } else if (b.isEnteringMaintenance()) {
+        return -1;
+      } else {
+        return 0;
+      }
+    }
+  }
+
+  /**
+   * Comparator for sorting DataNodeInfo[] based on
+   * stale, decommissioned and entering_maintenance states.
+   * Order: live -> stale -> entering_maintenance -> decommissioned
+   */
+  @InterfaceAudience.Private 
+  public static class ServiceAndStaleComparator extends ServiceComparator {
+    private final long staleInterval;
+
+    /**
+     * Constructor of ServiceAndStaleComparator
+     * 
+     * @param interval
+     *          The time interval for marking datanodes as stale is passed from
+     *          outside, since the interval may be changed dynamically
+     */
+    public ServiceAndStaleComparator(long interval) {
+      this.staleInterval = interval;
+    }
+
+    @Override
+    public int compare(DatanodeInfo a, DatanodeInfo b) {
+      int ret = super.compare(a, b);
+      if (ret != 0) {
+        return ret;
+      }
+
       // Stale nodes will be moved behind the normal nodes
       boolean aStale = a.isStale(staleInterval);
       boolean bStale = b.isStale(staleInterval);
@@ -332,7 +349,8 @@ public class DFSUtil {
   public static byte[][] getPathComponents(String path) {
     // avoid intermediate split to String[]
     final byte[] bytes = string2Bytes(path);
-    return bytes2byteArray(bytes, bytes.length, (byte)Path.SEPARATOR_CHAR);
+    return DFSUtilClient
+        .bytes2byteArray(bytes, bytes.length, (byte) Path.SEPARATOR_CHAR);
   }
 
   /**
@@ -352,42 +370,9 @@ public class DFSUtil {
    * @param len the number of bytes to split
    * @param separator the delimiting byte
    */
-  public static byte[][] bytes2byteArray(byte[] bytes,
-                                         int len,
-                                         byte separator) {
-    Preconditions.checkPositionIndex(len, bytes.length);
-    if (len == 0) {
-      return new byte[][]{null};
-    }
-    // Count the splits. Omit multiple separators and the last one by
-    // peeking at prior byte.
-    int splits = 0;
-    for (int i = 1; i < len; i++) {
-      if (bytes[i-1] == separator && bytes[i] != separator) {
-        splits++;
-      }
-    }
-    if (splits == 0 && bytes[0] == separator) {
-      return new byte[][]{null};
-    }
-    splits++;
-    byte[][] result = new byte[splits][];
-    int nextIndex = 0;
-    // Build the splits.
-    for (int i = 0; i < splits; i++) {
-      int startIndex = nextIndex;
-      // find next separator in the bytes.
-      while (nextIndex < len && bytes[nextIndex] != separator) {
-        nextIndex++;
-      }
-      result[i] = (nextIndex > 0)
-          ? Arrays.copyOfRange(bytes, startIndex, nextIndex)
-          : DFSUtilClient.EMPTY_BYTES; // reuse empty bytes for root.
-      do { // skip over separators.
-        nextIndex++;
-      } while (nextIndex < len && bytes[nextIndex] == separator);
-    }
-    return result;
+  public static byte[][] bytes2byteArray(byte[] bytes, int len,
+      byte separator) {
+    return DFSUtilClient.bytes2byteArray(bytes, len, separator);
   }
 
   /**
@@ -441,16 +426,82 @@ public class DFSUtil {
   }
 
   /**
-   * Returns list of InetSocketAddress corresponding to HA NN RPC addresses from
-   * the configuration.
-   * 
+   * Returns list of Journalnode addresses from the configuration.
+   *
    * @param conf configuration
-   * @return list of InetSocketAddresses
+   * @return list of journalnode host names
+   * @throws URISyntaxException
+   * @throws IOException
    */
-  public static Map<String, Map<String, InetSocketAddress>> getHaNnRpcAddresses(
-      Configuration conf) {
-    return DFSUtilClient.getAddresses(conf, null,
-                                      DFSConfigKeys.DFS_NAMENODE_RPC_ADDRESS_KEY);
+  public static Set<String> getJournalNodeAddresses(
+      Configuration conf) throws URISyntaxException, IOException {
+    Set<String> journalNodeList = new HashSet<>();
+    String journalsUri = "";
+    try {
+      journalsUri = conf.get(DFS_NAMENODE_SHARED_EDITS_DIR_KEY);
+      if (journalsUri == null) {
+        Collection<String> nameserviceIds = DFSUtilClient.
+            getNameServiceIds(conf);
+        for (String nsId : nameserviceIds) {
+          journalsUri = DFSUtilClient.getConfValue(
+              null, nsId, conf, DFS_NAMENODE_SHARED_EDITS_DIR_KEY);
+          if (journalsUri == null) {
+            Collection<String> nnIds = DFSUtilClient.getNameNodeIds(conf, nsId);
+            for (String nnId : nnIds) {
+              String suffix = DFSUtilClient.concatSuffixes(nsId, nnId);
+              journalsUri = DFSUtilClient.getConfValue(
+                  null, suffix, conf, DFS_NAMENODE_SHARED_EDITS_DIR_KEY);
+              if (journalsUri == null ||
+                  !journalsUri.startsWith("qjournal://")) {
+                return journalNodeList;
+              } else {
+                LOG.warn(DFS_NAMENODE_SHARED_EDITS_DIR_KEY +" is to be " +
+                    "configured as nameservice" +
+                    " specific key(append it with nameserviceId), no need" +
+                    " to append it with namenodeId");
+                URI uri = new URI(journalsUri);
+                List<InetSocketAddress> socketAddresses = Util.
+                    getAddressesList(uri);
+                for (InetSocketAddress is : socketAddresses) {
+                  journalNodeList.add(is.getHostName());
+                }
+              }
+            }
+          } else if (!journalsUri.startsWith("qjournal://")) {
+            return journalNodeList;
+          } else {
+            URI uri = new URI(journalsUri);
+            List<InetSocketAddress> socketAddresses = Util.
+                getAddressesList(uri);
+            for (InetSocketAddress is : socketAddresses) {
+              journalNodeList.add(is.getHostName());
+            }
+          }
+        }
+      } else {
+        if (!journalsUri.startsWith("qjournal://")) {
+          return journalNodeList;
+        } else {
+          URI uri = new URI(journalsUri);
+          List<InetSocketAddress> socketAddresses = Util.getAddressesList(uri);
+          for (InetSocketAddress is : socketAddresses) {
+            journalNodeList.add(is.getHostName());
+          }
+        }
+      }
+    } catch(UnknownHostException e) {
+      LOG.error("The conf property " + DFS_NAMENODE_SHARED_EDITS_DIR_KEY
+          + " is not properly set with correct journal node hostnames");
+      throw new UnknownHostException(journalsUri);
+    } catch(URISyntaxException e)  {
+      LOG.error("The conf property " + DFS_NAMENODE_SHARED_EDITS_DIR_KEY
+          + "is not set properly with correct journal node uri");
+      throw new URISyntaxException(journalsUri, "The conf property " +
+          DFS_NAMENODE_SHARED_EDITS_DIR_KEY + "is not" +
+          " properly set with correct journal node uri");
+    }
+
+    return journalNodeList;
   }
 
   /**
@@ -684,7 +735,7 @@ public class DFSUtil {
   
   public static String nnAddressesAsString(Configuration conf) {
     Map<String, Map<String, InetSocketAddress>> addresses =
-      getHaNnRpcAddresses(conf);
+        DFSUtilClient.getHaNnRpcAddresses(conf);
     return addressMapToString(addresses);
   }
 
@@ -1079,7 +1130,42 @@ public class DFSUtil {
     
     return getSuffixIDs(conf, addressKey, null, nnId, LOCAL_ADDRESS_MATCHER)[0];
   }
-  
+
+  /**
+   * Determine the {@link InetSocketAddress} to bind to, for any service.
+   * In case of HA or federation, the address is assumed to specified as
+   * {@code confKey}.NAMESPACEID.NAMENODEID as appropriate.
+   *
+   * @param conf configuration.
+   * @param confKey configuration key (prefix if HA/federation) used to
+   *        specify the address for the service.
+   * @param defaultValue default value for the address.
+   * @param bindHostKey configuration key (prefix if HA/federation)
+   *        specifying host to bind to.
+   * @return the address to bind to.
+   */
+  public static InetSocketAddress getBindAddress(Configuration conf,
+      String confKey, String defaultValue, String bindHostKey) {
+    InetSocketAddress address;
+    String nsId = DFSUtil.getNamenodeNameServiceId(conf);
+    String bindHostActualKey;
+    if (nsId != null) {
+      String namenodeId = HAUtil.getNameNodeId(conf, nsId);
+      address = DFSUtilClient.getAddressesForNameserviceId(
+          conf, nsId, null, confKey).get(namenodeId);
+      bindHostActualKey = DFSUtil.addKeySuffixes(bindHostKey, nsId, namenodeId);
+    } else {
+      address = NetUtils.createSocketAddr(conf.get(confKey, defaultValue));
+      bindHostActualKey = bindHostKey;
+    }
+
+    String bindHost = conf.get(bindHostActualKey);
+    if (bindHost == null || bindHost.isEmpty()) {
+      bindHost = address.getHostName();
+    }
+    return new InetSocketAddress(bindHost, address.getPort());
+  }
+
   /**
    * Returns nameservice Id and namenode Id when the local host matches the
    * configuration parameter {@code addressKey}.<nameservice Id>.<namenode Id>
@@ -1238,6 +1324,44 @@ public class DFSUtil {
       serviceRpcAddr = conf.get(addrKey);
     }
     return serviceRpcAddr;
+  }
+
+  /**
+   * Map a logical namenode ID to its web address. Use the given nameservice if
+   * specified, or the configured one if none is given.
+   *
+   * @param conf Configuration
+   * @param nsId which nameservice nnId is a part of, optional
+   * @param nnId the namenode ID to get the service addr for
+   * @return the service addr, null if it could not be determined
+   */
+  public static String getNamenodeWebAddr(final Configuration conf, String nsId,
+      String nnId) {
+
+    if (nsId == null) {
+      nsId = getOnlyNameServiceIdOrNull(conf);
+    }
+
+    String webAddrKey = DFSUtilClient.concatSuffixes(
+        DFSConfigKeys.DFS_NAMENODE_HTTP_ADDRESS_KEY, nsId, nnId);
+
+    String webAddr =
+        conf.get(webAddrKey, DFSConfigKeys.DFS_NAMENODE_HTTP_ADDRESS_DEFAULT);
+    return webAddr;
+  }
+
+  /**
+   * Get all of the Web addresses of the individual NNs in a given nameservice.
+   *
+   * @param conf Configuration
+   * @param nsId the nameservice whose NNs addresses we want.
+   * @param defaultValue default address to return in case key is not found.
+   * @return A map from nnId -> Web address of each NN in the nameservice.
+   */
+  public static Map<String, InetSocketAddress> getWebAddressesForNameserviceId(
+      Configuration conf, String nsId, String defaultValue) {
+    return DFSUtilClient.getAddressesForNameserviceId(conf, nsId, defaultValue,
+        DFSConfigKeys.DFS_NAMENODE_HTTP_ADDRESS_KEY);
   }
 
   /**
@@ -1566,12 +1690,30 @@ public class DFSUtil {
    */
   public static KeyProviderCryptoExtension createKeyProviderCryptoExtension(
       final Configuration conf) throws IOException {
-    KeyProvider keyProvider = DFSUtilClient.createKeyProvider(conf);
+    KeyProvider keyProvider = HdfsKMSUtil.createKeyProvider(conf);
     if (keyProvider == null) {
       return null;
     }
     KeyProviderCryptoExtension cryptoProvider = KeyProviderCryptoExtension
         .createKeyProviderCryptoExtension(keyProvider);
     return cryptoProvider;
+  }
+
+  /**
+   * Decodes an HDFS delegation token to its identifier.
+   *
+   * @param token the token
+   * @return the decoded identifier.
+   * @throws IOException
+   */
+  public static DelegationTokenIdentifier decodeDelegationToken(
+      final Token<DelegationTokenIdentifier> token) throws IOException {
+    final DelegationTokenIdentifier id = new DelegationTokenIdentifier();
+    final ByteArrayInputStream buf =
+        new ByteArrayInputStream(token.getIdentifier());
+    try (DataInputStream in = new DataInputStream(buf)) {
+      id.readFields(in);
+    }
+    return id;
   }
 }

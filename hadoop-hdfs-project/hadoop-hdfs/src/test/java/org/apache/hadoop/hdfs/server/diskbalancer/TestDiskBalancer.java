@@ -28,6 +28,7 @@ import org.apache.hadoop.hdfs.DFSConfigKeys;
 import org.apache.hadoop.hdfs.DFSTestUtil;
 import org.apache.hadoop.hdfs.HdfsConfiguration;
 import org.apache.hadoop.hdfs.MiniDFSCluster;
+import org.apache.hadoop.hdfs.MiniDFSNNTopology;
 import org.apache.hadoop.hdfs.protocol.ExtendedBlock;
 import org.apache.hadoop.hdfs.server.balancer.TestBalancer;
 import org.apache.hadoop.hdfs.server.datanode.DataNode;
@@ -44,7 +45,6 @@ import org.apache.hadoop.hdfs.server.diskbalancer.connectors.ClusterConnector;
 import org.apache.hadoop.hdfs.server.diskbalancer.connectors.ConnectorFactory;
 import org.apache.hadoop.hdfs.server.diskbalancer.datamodel.DiskBalancerCluster;
 import org.apache.hadoop.hdfs.server.diskbalancer.datamodel.DiskBalancerDataNode;
-import org.apache.hadoop.hdfs.server.diskbalancer.datamodel.DiskBalancerVolume;
 import org.apache.hadoop.hdfs.server.diskbalancer.planner.NodePlan;
 import org.apache.hadoop.test.GenericTestUtils;
 import org.apache.hadoop.util.Time;
@@ -109,6 +109,11 @@ public class TestDiskBalancer {
           .getFsVolumeReferences()) {
         assertEquals(ref.size(), dbDnNode.getVolumeCount());
       }
+
+      // Shutdown the DN first, to verify that calling diskbalancer APIs on
+      // uninitialized DN doesn't NPE
+      dnNode.shutdown();
+      assertEquals("", dnNode.getDiskBalancerStatus());
     } finally {
       cluster.shutdown();
     }
@@ -137,6 +142,7 @@ public class TestDiskBalancer {
     final int dataNodeCount = 1;
     final int dataNodeIndex = 0;
     final int sourceDiskIndex = 0;
+    final long cap = blockSize * 2L * blockCount;
 
     MiniDFSCluster cluster = new ClusterBuilder()
         .setBlockCount(blockCount)
@@ -144,6 +150,7 @@ public class TestDiskBalancer {
         .setDiskCount(diskCount)
         .setNumDatanodes(dataNodeCount)
         .setConf(conf)
+        .setCapacities(new long[] {cap, cap})
         .build();
     try {
       DataMover dataMover = new DataMover(cluster, dataNodeIndex,
@@ -152,11 +159,127 @@ public class TestDiskBalancer {
       NodePlan plan = dataMover.generatePlan();
       dataMover.executePlan(plan);
       dataMover.verifyPlanExectionDone();
-      dataMover.verifyAllVolumesHaveData();
+      dataMover.verifyAllVolumesHaveData(true);
       dataMover.verifyTolerance(plan, 0, sourceDiskIndex, 10);
     } finally {
       cluster.shutdown();
     }
+  }
+
+  @Test
+  public void testDiskBalancerWithFederatedCluster() throws Exception {
+
+    Configuration conf = new HdfsConfiguration();
+    conf.setBoolean(DFSConfigKeys.DFS_DISK_BALANCER_ENABLED, true);
+    final int blockCount = 100;
+    final int blockSize = 1024;
+    final int diskCount = 2;
+    final int dataNodeCount = 1;
+    final int dataNodeIndex = 0;
+    final int sourceDiskIndex = 0;
+    final long cap = blockSize * 3L * blockCount;
+
+    conf.setInt(DFSConfigKeys.DFS_BLOCK_SIZE_KEY, blockSize);
+    conf.setInt(DFSConfigKeys.DFS_BYTES_PER_CHECKSUM_KEY, blockSize);
+
+    final MiniDFSCluster cluster = new MiniDFSCluster.Builder(conf)
+        .nnTopology(MiniDFSNNTopology.simpleFederatedTopology(2))
+        .numDataNodes(dataNodeCount)
+        .storagesPerDatanode(diskCount)
+        .storageCapacities(new long[] {cap, cap})
+        .build();
+    cluster.waitActive();
+
+    DFSTestUtil.setFederatedConfiguration(cluster, conf);
+
+    final String fileName = "/tmp.txt";
+    final Path filePath = new Path(fileName);
+    long fileLen = blockCount * blockSize;
+
+
+    FileSystem fs = cluster.getFileSystem(0);
+    TestBalancer.createFile(cluster, filePath, fileLen, (short) 1,
+        0);
+    DFSTestUtil.waitReplication(fs, filePath, (short) 1);
+
+    fs = cluster.getFileSystem(1);
+    TestBalancer.createFile(cluster, filePath, fileLen, (short) 1,
+        1);
+    DFSTestUtil.waitReplication(fs, filePath, (short) 1);
+
+    try {
+      DataMover dataMover = new DataMover(cluster, dataNodeIndex,
+          sourceDiskIndex, conf, blockSize, blockCount);
+      dataMover.moveDataToSourceDisk();
+      NodePlan plan = dataMover.generatePlan();
+      dataMover.executePlan(plan);
+      dataMover.verifyPlanExectionDone();
+      dataMover.verifyAllVolumesHaveData(true);
+      dataMover.verifyTolerance(plan, 0, sourceDiskIndex, 10);
+    } finally {
+      cluster.shutdown();
+    }
+
+  }
+
+
+  @Test
+  public void testDiskBalancerWithFedClusterWithOneNameServiceEmpty() throws
+      Exception {
+    Configuration conf = new HdfsConfiguration();
+    conf.setBoolean(DFSConfigKeys.DFS_DISK_BALANCER_ENABLED, true);
+    final int blockCount = 100;
+    final int blockSize = 1024;
+    final int diskCount = 2;
+    final int dataNodeCount = 1;
+    final int dataNodeIndex = 0;
+    final int sourceDiskIndex = 0;
+    final long cap = blockSize * 3L * blockCount;
+
+    conf.setInt(DFSConfigKeys.DFS_BLOCK_SIZE_KEY, blockSize);
+    conf.setInt(DFSConfigKeys.DFS_BYTES_PER_CHECKSUM_KEY, blockSize);
+
+    final MiniDFSCluster cluster = new MiniDFSCluster.Builder(conf)
+        .nnTopology(MiniDFSNNTopology.simpleFederatedTopology(2))
+        .numDataNodes(dataNodeCount)
+        .storagesPerDatanode(diskCount)
+        .storageCapacities(new long[] {cap, cap})
+        .build();
+    cluster.waitActive();
+
+    DFSTestUtil.setFederatedConfiguration(cluster, conf);
+
+    final String fileName = "/tmp.txt";
+    final Path filePath = new Path(fileName);
+    long fileLen = blockCount * blockSize;
+
+
+    //Writing data only to one nameservice.
+    FileSystem fs = cluster.getFileSystem(0);
+    TestBalancer.createFile(cluster, filePath, fileLen, (short) 1,
+        0);
+    DFSTestUtil.waitReplication(fs, filePath, (short) 1);
+
+
+    GenericTestUtils.LogCapturer logCapturer = GenericTestUtils.LogCapturer
+        .captureLogs(DiskBalancer.LOG);
+
+    try {
+      DataMover dataMover = new DataMover(cluster, dataNodeIndex,
+          sourceDiskIndex, conf, blockSize, blockCount);
+      dataMover.moveDataToSourceDisk();
+      NodePlan plan = dataMover.generatePlan();
+      dataMover.executePlan(plan);
+      dataMover.verifyPlanExectionDone();
+      //Because here we have one nameservice empty, don't check
+      // blockPoolCount.
+      dataMover.verifyAllVolumesHaveData(false);
+    } finally {
+      Assert.assertTrue(logCapturer.getOutput().contains("There are no " +
+          "blocks in the blockPool"));
+      cluster.shutdown();
+    }
+
   }
 
   @Test
@@ -174,7 +297,7 @@ public class TestDiskBalancer {
     final int dataNodeCount = 1;
     final int dataNodeIndex = 0;
     final int sourceDiskIndex = 0;
-
+    final long cap = blockSize * 2L * blockCount;
 
     MiniDFSCluster cluster = new ClusterBuilder()
         .setBlockCount(blockCount)
@@ -182,8 +305,8 @@ public class TestDiskBalancer {
         .setDiskCount(diskCount)
         .setNumDatanodes(dataNodeCount)
         .setConf(conf)
+        .setCapacities(new long[] {cap, cap, cap})
         .build();
-
 
     try {
       DataMover dataMover = new DataMover(cluster, dataNodeIndex,
@@ -197,7 +320,7 @@ public class TestDiskBalancer {
 
       dataMover.executePlan(plan);
       dataMover.verifyPlanExectionDone();
-      dataMover.verifyAllVolumesHaveData();
+      dataMover.verifyAllVolumesHaveData(true);
       dataMover.verifyTolerance(plan, 0, sourceDiskIndex, 10);
     } finally {
       cluster.shutdown();
@@ -221,6 +344,7 @@ public class TestDiskBalancer {
     final int dataNodeCount = 1;
     final int dataNodeIndex = 0;
     final int sourceDiskIndex = 0;
+    final long cap = blockSize * 2L * blockCount;
 
     MiniDFSCluster cluster = new ClusterBuilder()
         .setBlockCount(blockCount)
@@ -228,6 +352,7 @@ public class TestDiskBalancer {
         .setDiskCount(diskCount)
         .setNumDatanodes(dataNodeCount)
         .setConf(conf)
+        .setCapacities(new long[] {cap, cap})
         .build();
 
     try {
@@ -236,30 +361,14 @@ public class TestDiskBalancer {
       dataMover.moveDataToSourceDisk();
       NodePlan plan = dataMover.generatePlan();
       dataMover.executePlanDuringDiskRemove(plan);
-      dataMover.verifyAllVolumesHaveData();
+      dataMover.verifyAllVolumesHaveData(true);
       dataMover.verifyTolerance(plan, 0, sourceDiskIndex, 10);
     } catch (Exception e) {
       Assert.fail("Unexpected exception: " + e);
     } finally {
-      cluster.shutdown();
-    }
-  }
-
-  /**
-   * Sets alll Disks capacity to size specified.
-   *
-   * @param cluster - DiskBalancerCluster
-   * @param size    - new size of the disk
-   */
-  private void setVolumeCapacity(DiskBalancerCluster cluster, long size,
-                                 String diskType) {
-    Preconditions.checkNotNull(cluster);
-    for (DiskBalancerDataNode node : cluster.getNodes()) {
-      for (DiskBalancerVolume vol :
-          node.getVolumeSets().get(diskType).getVolumes()) {
-        vol.setCapacity(size);
+      if (cluster != null) {
+        cluster.shutdown();
       }
-      node.getVolumeSets().get(diskType).computeVolumeDataDensity();
     }
   }
 
@@ -274,6 +383,7 @@ public class TestDiskBalancer {
     private int fileLen;
     private int blockCount;
     private int diskCount;
+    private long[] capacities;
 
     public ClusterBuilder setConf(Configuration conf) {
       this.conf = conf;
@@ -300,13 +410,9 @@ public class TestDiskBalancer {
       return this;
     }
 
-    private long[] getCapacities(int diskCount, int bSize, int fSize) {
-      Preconditions.checkState(diskCount > 0);
-      long[] capacities = new long[diskCount];
-      for (int x = 0; x < diskCount; x++) {
-        capacities[x] = diskCount * bSize * fSize * 2L;
-      }
-      return capacities;
+    private ClusterBuilder setCapacities(final long[] caps) {
+      this.capacities = caps;
+      return this;
     }
 
     private StorageType[] getStorageTypes(int diskCount) {
@@ -338,7 +444,7 @@ public class TestDiskBalancer {
       // Write a file and restart the cluster
       MiniDFSCluster cluster = new MiniDFSCluster.Builder(conf)
           .numDataNodes(numDatanodes)
-          .storageCapacities(getCapacities(diskCount, blockSize, fileLen))
+          .storageCapacities(capacities)
           .storageTypes(getStorageTypes(diskCount))
           .storagesPerDatanode(diskCount)
           .build();
@@ -447,10 +553,6 @@ public class TestDiskBalancer {
       diskBalancerCluster.readClusterInfo();
       List<DiskBalancerDataNode> nodesToProcess = new LinkedList<>();
 
-      // Rewrite the capacity in the model to show that disks need
-      // re-balancing.
-      setVolumeCapacity(diskBalancerCluster, blockSize * 2L * blockCount,
-          "DISK");
       // Pick a node to process.
       nodesToProcess.add(diskBalancerCluster.getNodeByUUID(
           node.getDatanodeUuid()));
@@ -614,14 +716,15 @@ public class TestDiskBalancer {
     /**
      * Once diskBalancer is run, all volumes mush has some data.
      */
-    public void verifyAllVolumesHaveData() throws IOException {
+    public void verifyAllVolumesHaveData(boolean checkblockPoolCount) throws
+        IOException {
       node = cluster.getDataNodes().get(dataNodeIndex);
       try (FsDatasetSpi.FsVolumeReferences refs =
                node.getFSDataset().getFsVolumeReferences()) {
         for (FsVolumeSpi volume : refs) {
-          assertTrue(DiskBalancerTestUtil.getBlockCount(volume) > 0);
-          LOG.info(refs.toString() + " : Block Count : {}",
-              DiskBalancerTestUtil.getBlockCount(volume));
+          assertTrue(DiskBalancerTestUtil.getBlockCount(volume, checkblockPoolCount) > 0);
+          LOG.info("{} : Block Count : {}", refs, DiskBalancerTestUtil
+              .getBlockCount(volume, checkblockPoolCount));
         }
       }
     }
@@ -638,12 +741,11 @@ public class TestDiskBalancer {
       try (FsDatasetSpi.FsVolumeReferences refs =
                node.getFSDataset().getFsVolumeReferences()) {
         volume = (FsVolumeImpl) refs.get(sourceDiskIndex);
-        assertTrue(DiskBalancerTestUtil.getBlockCount(volume) > 0);
+        assertTrue(DiskBalancerTestUtil.getBlockCount(volume, true) > 0);
 
-        assertTrue(
-            (DiskBalancerTestUtil.getBlockCount(volume) *
-                (blockSize + delta)) >=
-                plan.getVolumeSetPlans().get(0).getBytesToMove());
+        assertTrue((DiskBalancerTestUtil.getBlockCount(volume, true) *
+            (blockSize + delta)) >= plan.getVolumeSetPlans().get(0)
+            .getBytesToMove());
       }
     }
   }

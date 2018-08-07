@@ -69,7 +69,7 @@ class OpenFileCtxCache {
     Iterator<Entry<FileHandle, OpenFileCtx>> it = openFileMap.entrySet()
         .iterator();
     if (LOG.isTraceEnabled()) {
-      LOG.trace("openFileMap size:" + openFileMap.size());
+      LOG.trace("openFileMap size:" + size());
     }
 
     Entry<FileHandle, OpenFileCtx> idlest = null;
@@ -117,10 +117,10 @@ class OpenFileCtxCache {
   boolean put(FileHandle h, OpenFileCtx context) {
     OpenFileCtx toEvict = null;
     synchronized (this) {
-      Preconditions.checkState(openFileMap.size() <= this.maxStreams,
-          "stream cache size " + openFileMap.size()
-              + "  is larger than maximum" + this.maxStreams);
-      if (openFileMap.size() == this.maxStreams) {
+      Preconditions.checkState(size() <= this.maxStreams,
+          "stream cache size " + size() + "  is larger than maximum" + this
+              .maxStreams);
+      if (size() == this.maxStreams) {
         Entry<FileHandle, OpenFileCtx> pairs = getEntryToEvict();
         if (pairs ==null) {
           return false;
@@ -149,14 +149,14 @@ class OpenFileCtxCache {
     Iterator<Entry<FileHandle, OpenFileCtx>> it = openFileMap.entrySet()
         .iterator();
     if (LOG.isTraceEnabled()) {
-      LOG.trace("openFileMap size:" + openFileMap.size());
+      LOG.trace("openFileMap size:" + size());
     }
 
     while (it.hasNext()) {
       Entry<FileHandle, OpenFileCtx> pairs = it.next();
       FileHandle handle = pairs.getKey();
       OpenFileCtx ctx = pairs.getValue();
-      if (!ctx.streamCleanup(handle.getFileId(), streamTimeout)) {
+      if (!ctx.streamCleanup(handle, streamTimeout)) {
         continue;
       }
 
@@ -164,11 +164,11 @@ class OpenFileCtxCache {
       synchronized (this) {
         OpenFileCtx ctx2 = openFileMap.get(handle);
         if (ctx2 != null) {
-          if (ctx2.streamCleanup(handle.getFileId(), streamTimeout)) {
+          if (ctx2.streamCleanup(handle, streamTimeout)) {
             openFileMap.remove(handle);
             if (LOG.isDebugEnabled()) {
-              LOG.debug("After remove stream " + handle.getFileId()
-                  + ", the stream number:" + openFileMap.size());
+              LOG.debug("After remove stream " + handle.dumpFileHandle()
+                  + ", the stream number:" + size());
             }
             ctxToRemove.add(ctx2);
           }
@@ -201,7 +201,7 @@ class OpenFileCtxCache {
       Iterator<Entry<FileHandle, OpenFileCtx>> it = openFileMap.entrySet()
           .iterator();
       if (LOG.isTraceEnabled()) {
-        LOG.trace("openFileMap size:" + openFileMap.size());
+        LOG.trace("openFileMap size:" + size());
       }
 
       while (it.hasNext()) {

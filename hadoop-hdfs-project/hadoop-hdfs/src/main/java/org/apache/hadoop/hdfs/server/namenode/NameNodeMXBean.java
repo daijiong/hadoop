@@ -24,9 +24,11 @@ import org.apache.hadoop.classification.InterfaceStability;
 import org.apache.hadoop.hdfs.protocol.RollingUpgradeInfo;
 
 /**
- * This is the JMX management interface for namenode information
+ * This is the JMX management interface for namenode information.
+ * End users shouldn't be implementing these interfaces, and instead
+ * access this information through the JMX APIs.
  */
-@InterfaceAudience.Public
+@InterfaceAudience.Private
 @InterfaceStability.Stable
 public interface NameNodeMXBean {
 
@@ -63,8 +65,14 @@ public interface NameNodeMXBean {
    * @return the total raw bytes including non-dfs used space
    */
   public long getTotal();
-  
-  
+
+  /**
+   * Gets capacity of the provided storage mounted, in bytes.
+   *
+   * @return the total raw bytes present in the provided storage.
+   */
+  public long getProvidedCapacity();
+
   /**
    * Gets the safemode status
    * 
@@ -188,7 +196,14 @@ public interface NameNodeMXBean {
    * @return the decommissioning node information
    */
   public String getDecomNodes();
-  
+
+  /**
+   * Gets the information on nodes entering maintenance.
+   *
+   * @return the information on nodes entering maintenance
+   */
+  String getEnteringMaintenanceNodes();
+
   /**
    * Gets the cluster id.
    * 

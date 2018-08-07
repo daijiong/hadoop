@@ -60,14 +60,17 @@ public class HttpFSParametersProvider extends ParametersProvider {
     PARAMS_DEF.put(Operation.GETFILECHECKSUM, new Class[]{});
     PARAMS_DEF.put(Operation.GETFILEBLOCKLOCATIONS, new Class[]{});
     PARAMS_DEF.put(Operation.GETACLSTATUS, new Class[]{});
+    PARAMS_DEF.put(Operation.GETTRASHROOT, new Class[]{});
     PARAMS_DEF.put(Operation.INSTRUMENTATION, new Class[]{});
     PARAMS_DEF.put(Operation.APPEND, new Class[]{DataParam.class});
     PARAMS_DEF.put(Operation.CONCAT, new Class[]{SourcesParam.class});
     PARAMS_DEF.put(Operation.TRUNCATE, new Class[]{NewLengthParam.class});
     PARAMS_DEF.put(Operation.CREATE,
-      new Class[]{PermissionParam.class, OverwriteParam.class,
-                  ReplicationParam.class, BlockSizeParam.class, DataParam.class});
-    PARAMS_DEF.put(Operation.MKDIRS, new Class[]{PermissionParam.class});
+        new Class[]{PermissionParam.class, OverwriteParam.class,
+            ReplicationParam.class, BlockSizeParam.class, DataParam.class,
+            UnmaskedPermissionParam.class});
+    PARAMS_DEF.put(Operation.MKDIRS, new Class[]{PermissionParam.class,
+        UnmaskedPermissionParam.class});
     PARAMS_DEF.put(Operation.RENAME, new Class[]{DestinationParam.class});
     PARAMS_DEF.put(Operation.SETOWNER,
         new Class[]{OwnerParam.class, GroupParam.class});
@@ -93,6 +96,18 @@ public class HttpFSParametersProvider extends ParametersProvider {
     PARAMS_DEF.put(Operation.LISTXATTRS, new Class[]{});
     PARAMS_DEF.put(Operation.LISTSTATUS_BATCH,
         new Class[]{StartAfterParam.class});
+    PARAMS_DEF.put(Operation.GETALLSTORAGEPOLICY, new Class[] {});
+    PARAMS_DEF.put(Operation.GETSTORAGEPOLICY, new Class[] {});
+    PARAMS_DEF.put(Operation.SETSTORAGEPOLICY,
+        new Class[] {PolicyNameParam.class});
+    PARAMS_DEF.put(Operation.UNSETSTORAGEPOLICY, new Class[] {});
+    PARAMS_DEF.put(Operation.CREATESNAPSHOT,
+            new Class[] {SnapshotNameParam.class});
+    PARAMS_DEF.put(Operation.DELETESNAPSHOT,
+            new Class[] {SnapshotNameParam.class});
+    PARAMS_DEF.put(Operation.RENAMESNAPSHOT,
+            new Class[] {OldSnapshotNameParam.class,
+                SnapshotNameParam.class});
   }
 
   public HttpFSParametersProvider() {
@@ -372,6 +387,28 @@ public class HttpFSParametersProvider extends ParametersProvider {
   }
 
   /**
+   * Class for unmaskedpermission parameter.
+   */
+  @InterfaceAudience.Private
+  public static class UnmaskedPermissionParam extends ShortParam {
+
+    /**
+     * Parameter name.
+     */
+    public static final String NAME =
+        HttpFSFileSystem.UNMASKED_PERMISSION_PARAM;
+
+
+    /**
+     * Constructor.
+     */
+    public UnmaskedPermissionParam() {
+      super(NAME, (short) -1, 8);
+    }
+
+  }
+
+  /**
    * Class for AclPermission parameter.
    */
   @InterfaceAudience.Private
@@ -540,4 +577,60 @@ public class HttpFSParametersProvider extends ParametersProvider {
       super(NAME, null);
     }
   }
+
+  /**
+   * Class for policyName parameter.
+   */
+  @InterfaceAudience.Private
+  public static class PolicyNameParam extends StringParam {
+    /**
+     * Parameter name.
+     */
+    public static final String NAME = HttpFSFileSystem.POLICY_NAME_PARAM;
+
+    /**
+     * Constructor.
+     */
+    public PolicyNameParam() {
+      super(NAME, null);
+    }
+  }
+
+  /**
+   * Class for SnapshotName parameter.
+   */
+  public static class SnapshotNameParam extends StringParam {
+
+    /**
+     * Parameter name.
+     */
+    public static final String NAME = HttpFSFileSystem.SNAPSHOT_NAME_PARAM;
+
+    /**
+     * Constructor.
+     */
+    public SnapshotNameParam() {
+      super(NAME, null);
+    }
+
+  }
+
+  /**
+   * Class for OldSnapshotName parameter.
+   */
+  public static class OldSnapshotNameParam extends StringParam {
+
+    /**
+     * Parameter name.
+     */
+    public static final String NAME = HttpFSFileSystem.OLD_SNAPSHOT_NAME_PARAM;
+
+    /**
+     * Constructor.
+     */
+    public OldSnapshotNameParam() {
+      super(NAME, null);
+    }
+  }
+
 }

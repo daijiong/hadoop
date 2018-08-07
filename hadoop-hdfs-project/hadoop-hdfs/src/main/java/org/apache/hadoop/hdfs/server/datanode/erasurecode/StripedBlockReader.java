@@ -20,6 +20,7 @@ package org.apache.hadoop.hdfs.server.datanode.erasurecode;
 import org.apache.hadoop.classification.InterfaceAudience;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.ChecksumException;
+import org.apache.hadoop.fs.StorageType;
 import org.apache.hadoop.hdfs.BlockReader;
 import org.apache.hadoop.hdfs.DFSUtilClient;
 import org.apache.hadoop.hdfs.DFSUtilClient.CorruptedBlocks;
@@ -65,6 +66,7 @@ class StripedBlockReader {
   private final DatanodeInfo source;
   private BlockReader blockReader;
   private ByteBuffer buffer;
+  private boolean isLocal;
 
   StripedBlockReader(StripedReader stripedReader, DataNode datanode,
                      Configuration conf, short index, ExtendedBlock block,
@@ -76,6 +78,7 @@ class StripedBlockReader {
     this.index = index;
     this.source = source;
     this.block = block;
+    this.isLocal = false;
 
     BlockReader tmpBlockReader = createBlockReader(offsetInBlock);
     if (tmpBlockReader != null) {
@@ -102,11 +105,13 @@ class StripedBlockReader {
     if (offsetInBlock >= block.getNumBytes()) {
       return null;
     }
+    Peer peer = null;
     try {
       InetSocketAddress dnAddr =
           stripedReader.getSocketAddress4Transfer(source);
       Token<BlockTokenIdentifier> blockToken = datanode.getBlockAccessToken(
-          block, EnumSet.of(BlockTokenIdentifier.AccessMode.READ));
+          block, EnumSet.of(BlockTokenIdentifier.AccessMode.READ),
+          StorageType.EMPTY_ARRAY, new String[0]);
         /*
          * This can be further improved if the replica is local, then we can
          * read directly from DN and need to check the replica is FINALIZED
@@ -116,14 +121,18 @@ class StripedBlockReader {
          *
          * TODO: add proper tracer
          */
+      peer = newConnectedPeer(block, dnAddr, blockToken, source);
+      if (peer.isLocal()) {
+        this.isLocal = true;
+      }
       return BlockReaderRemote.newBlockReader(
           "dummy", block, blockToken, offsetInBlock,
-          block.getNumBytes() - offsetInBlock, true,
-          "", newConnectedPeer(block, dnAddr, blockToken, source), source,
-          null, stripedReader.getCachingStrategy(), datanode.getTracer(), -1);
+          block.getNumBytes() - offsetInBlock, true, "", peer, source,
+          null, stripedReader.getCachingStrategy(), -1);
     } catch (IOException e) {
       LOG.info("Exception while creating remote block reader, datanode {}",
           source, e);
+      IOUtils.closeStream(peer);
       return null;
     }
   }
@@ -187,6 +196,7 @@ class StripedBlockReader {
         break;
       }
       n += nread;
+      stripedReader.getReconstructor().incrBytesRead(isLocal, nread);
     }
   }
 

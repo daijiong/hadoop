@@ -40,6 +40,9 @@ import org.apache.hadoop.yarn.api.records.NodeId;
 import org.apache.hadoop.yarn.api.records.Priority;
 import org.apache.hadoop.yarn.api.records.Resource;
 import org.apache.hadoop.yarn.api.records.impl.pb.ContainerStatusPBImpl;
+import org.apache.hadoop.yarn.api.records.impl.pb.ProtoUtils;
+import org.apache.hadoop.yarn.api.records.impl.pb.ResourcePBImpl;
+import org.apache.hadoop.yarn.proto.YarnProtos.ResourceProto;
 import org.apache.hadoop.yarn.server.api.protocolrecords.impl.pb.NMContainerStatusPBImpl;
 
 import org.apache.hadoop.yarn.server.api.protocolrecords.impl.pb
@@ -48,12 +51,29 @@ import org.apache.hadoop.yarn.server.api.protocolrecords.impl.pb.NodeHeartbeatRe
 import org.apache.hadoop.yarn.server.api.protocolrecords.impl.pb.RegisterNodeManagerRequestPBImpl;
 
 import org.apache.hadoop.yarn.server.api.records.NodeStatus;
-import org.apache.hadoop.yarn.server.api.records.QueuedContainersStatus;
+import org.apache.hadoop.yarn.server.api.records.OpportunisticContainersStatus;
 import org.apache.hadoop.yarn.util.Records;
 import org.junit.Assert;
 import org.junit.Test;
 
 public class TestProtocolRecords {
+
+  @Test
+  public void testResource() {
+    final long mem = 123;
+    final int vcores = 456;
+    final Resource r = Resource.newInstance(mem, vcores);
+    // should be a lightweight SimpleResource which is a private inner class
+    // so just verify it's not the heavyweight pb impl.
+    Assert.assertFalse(r instanceof ResourcePBImpl);
+    Assert.assertEquals(mem, r.getMemorySize());
+    Assert.assertEquals(vcores, r.getVirtualCores());
+
+    ResourceProto proto = ProtoUtils.convertToProtoFormat(r);
+    Assert.assertEquals(mem, proto.getMemory());
+    Assert.assertEquals(vcores, proto.getVirtualCores());
+    Assert.assertEquals(r, ProtoUtils.convertFromProtoFormat(proto));
+  }
 
   @Test
   public void testNMContainerStatus() {
@@ -146,11 +166,11 @@ public class TestProtocolRecords {
         Records.newRecord(NodeHeartbeatRequest.class);
     NodeStatus nodeStatus =
         Records.newRecord(NodeStatus.class);
-    QueuedContainersStatus queuedContainersStatus = Records.newRecord
-        (QueuedContainersStatus.class);
-    queuedContainersStatus.setEstimatedQueueWaitTime(123);
-    queuedContainersStatus.setWaitQueueLength(321);
-    nodeStatus.setQueuedContainersStatus(queuedContainersStatus);
+    OpportunisticContainersStatus opportunisticContainersStatus =
+        Records.newRecord(OpportunisticContainersStatus.class);
+    opportunisticContainersStatus.setEstimatedQueueWaitTime(123);
+    opportunisticContainersStatus.setWaitQueueLength(321);
+    nodeStatus.setOpportunisticContainersStatus(opportunisticContainersStatus);
     record.setNodeStatus(nodeStatus);
 
     NodeHeartbeatRequestPBImpl pb = new
@@ -159,9 +179,10 @@ public class TestProtocolRecords {
 
     Assert.assertEquals(123,
         pb.getNodeStatus()
-            .getQueuedContainersStatus().getEstimatedQueueWaitTime());
+            .getOpportunisticContainersStatus().getEstimatedQueueWaitTime());
     Assert.assertEquals(321,
-        pb.getNodeStatus().getQueuedContainersStatus().getWaitQueueLength());
+        pb.getNodeStatus().getOpportunisticContainersStatus()
+            .getWaitQueueLength());
   }
 
   @Test

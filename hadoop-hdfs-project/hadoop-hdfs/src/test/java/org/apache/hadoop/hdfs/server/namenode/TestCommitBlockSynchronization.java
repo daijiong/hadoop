@@ -26,8 +26,8 @@ import org.apache.hadoop.hdfs.server.blockmanagement.BlockInfo;
 import org.apache.hadoop.hdfs.server.blockmanagement.BlockInfoContiguous;
 import org.apache.hadoop.hdfs.server.blockmanagement.DatanodeStorageInfo;
 import org.apache.hadoop.hdfs.server.common.HdfsServerConstants;
+import org.apache.hadoop.test.Whitebox;
 import org.junit.Test;
-import org.mockito.internal.util.reflection.Whitebox;
 
 import java.io.IOException;
 
@@ -73,7 +73,7 @@ public class TestCommitBlockSynchronization {
     blockInfo.setBlockCollectionId(file.getId());
     blockInfo.setGenerationStamp(genStamp);
     blockInfo.getUnderConstructionFeature().initializeBlockRecovery(blockInfo,
-        genStamp);
+        genStamp, true);
     doReturn(blockInfo).when(file).removeLastBlock(any(Block.class));
     doReturn(true).when(file).isUnderConstruction();
     doReturn(new BlockInfoContiguous[1]).when(file).getBlocks();

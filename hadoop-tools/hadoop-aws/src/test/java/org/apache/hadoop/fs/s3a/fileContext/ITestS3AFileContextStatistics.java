@@ -34,11 +34,14 @@ public class ITestS3AFileContextStatistics extends FCStatisticsBaseTest {
     fc = S3ATestUtils.createTestFileContext(conf);
     fc.mkdir(fileContextTestHelper.getTestRootPath(fc, "test"),
         FileContext.DEFAULT_PERM, true);
+    FileContext.clearStatistics();
   }
 
   @After
   public void tearDown() throws Exception {
-    fc.delete(fileContextTestHelper.getTestRootPath(fc, "test"), true);
+    if (fc != null) {
+      fc.delete(fileContextTestHelper.getTestRootPath(fc, "test"), true);
+    }
   }
 
   @Override

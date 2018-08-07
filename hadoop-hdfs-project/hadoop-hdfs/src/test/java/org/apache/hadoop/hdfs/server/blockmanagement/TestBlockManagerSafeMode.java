@@ -28,16 +28,16 @@ import org.apache.hadoop.hdfs.server.common.HdfsServerConstants.NamenodeRole;
 import org.apache.hadoop.hdfs.server.namenode.FSNamesystem;
 import org.apache.hadoop.hdfs.server.namenode.NameNode;
 import org.apache.hadoop.test.GenericTestUtils;
+import org.apache.hadoop.test.Whitebox;
 
 import org.junit.Before;
 import org.junit.Test;
-
-import org.mockito.internal.util.reflection.Whitebox;
 
 import java.io.IOException;
 import java.io.InterruptedIOException;
 import java.util.concurrent.TimeoutException;
 
+import static org.apache.hadoop.hdfs.DFSConfigKeys.DFS_NAMENODE_SAFEMODE_EXTENSION_DEFAULT;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertTrue;
@@ -390,6 +390,25 @@ public class TestBlockManagerSafeMode {
         "after leaving safe mode", 0L, bmSafeMode.getBytesInFuture());
     assertTrue("Leaving safe mode should succeed after blocks with future GS " +
         "are cleared.", bmSafeMode.leaveSafeMode(false));
+  }
+
+  @Test(timeout = 10000)
+  public void testExtensionConfig() {
+    final Configuration conf = new HdfsConfiguration();
+    bmSafeMode = new BlockManagerSafeMode(bm, fsn, false, conf);
+    assertEquals(DFS_NAMENODE_SAFEMODE_EXTENSION_DEFAULT, bmSafeMode.extension);
+
+    conf.set(DFSConfigKeys.DFS_NAMENODE_SAFEMODE_EXTENSION_KEY, "30000");
+    bmSafeMode = new BlockManagerSafeMode(bm, fsn, false, conf);
+    assertEquals(30000, bmSafeMode.extension);
+
+    conf.set(DFSConfigKeys.DFS_NAMENODE_SAFEMODE_EXTENSION_KEY, "20s");
+    bmSafeMode = new BlockManagerSafeMode(bm, fsn, false, conf);
+    assertEquals(20 * 1000, bmSafeMode.extension);
+
+    conf.set(DFSConfigKeys.DFS_NAMENODE_SAFEMODE_EXTENSION_KEY, "7m");
+    bmSafeMode = new BlockManagerSafeMode(bm, fsn, false, conf);
+    assertEquals(7 * 60 * 1000, bmSafeMode.extension);
   }
 
   /**

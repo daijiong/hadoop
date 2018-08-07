@@ -18,6 +18,8 @@
 package org.apache.hadoop.fs.http.client;
 
 import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Collection;
 import java.util.EnumSet;
 import java.util.List;
 
@@ -34,12 +36,14 @@ import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.fs.PositionedReadable;
 import org.apache.hadoop.fs.Seekable;
+import org.apache.hadoop.fs.StorageType;
 import org.apache.hadoop.fs.XAttrCodec;
 import org.apache.hadoop.fs.XAttrSetFlag;
 import org.apache.hadoop.fs.permission.AclEntry;
 import org.apache.hadoop.fs.permission.AclStatus;
 import org.apache.hadoop.fs.permission.FsPermission;
 import org.apache.hadoop.hdfs.DFSConfigKeys;
+import org.apache.hadoop.hdfs.protocol.BlockStoragePolicy;
 import org.apache.hadoop.hdfs.protocol.FsPermissionExtension;
 import org.apache.hadoop.lib.wsrs.EnumSetParam;
 import org.apache.hadoop.security.UserGroupInformation;
@@ -100,6 +104,7 @@ public class HttpFSFileSystem extends FileSystem
   public static final String REPLICATION_PARAM = "replication";
   public static final String BLOCKSIZE_PARAM = "blocksize";
   public static final String PERMISSION_PARAM = "permission";
+  public static final String UNMASKED_PERMISSION_PARAM = "unmaskedpermission";
   public static final String ACLSPEC_PARAM = "aclspec";
   public static final String DESTINATION_PARAM = "destination";
   public static final String RECURSIVE_PARAM = "recursive";
@@ -114,6 +119,9 @@ public class HttpFSFileSystem extends FileSystem
   public static final String XATTR_ENCODING_PARAM = "encoding";
   public static final String NEW_LENGTH_PARAM = "newlength";
   public static final String START_AFTER_PARAM = "startAfter";
+  public static final String POLICY_NAME_PARAM = "storagepolicy";
+  public static final String SNAPSHOT_NAME_PARAM = "snapshotname";
+  public static final String OLD_SNAPSHOT_NAME_PARAM = "oldsnapshotname";
 
   public static final Short DEFAULT_PERMISSION = 0755;
   public static final String ACLSPEC_DEFAULT = "";
@@ -128,11 +136,15 @@ public class HttpFSFileSystem extends FileSystem
 
   public static final String HOME_DIR_JSON = "Path";
 
+  public static final String TRASH_DIR_JSON = "Path";
+
   public static final String SET_REPLICATION_JSON = "boolean";
 
   public static final String UPLOAD_CONTENT_TYPE= "application/octet-stream";
 
-  public static enum FILE_TYPE {
+  public static final String SNAPSHOT_JSON = "Path";
+
+  public enum FILE_TYPE {
     FILE, DIRECTORY, SYMLINK;
 
     public static FILE_TYPE getType(FileStatus fileStatus) {
@@ -186,10 +198,15 @@ public class HttpFSFileSystem extends FileSystem
   public static final String ACL_BIT_JSON = "aclBit";
 
   public static final String ENC_BIT_JSON = "encBit";
+  public static final String EC_BIT_JSON = "ecBit";
+  public static final String SNAPSHOT_BIT_JSON = "seBit";
 
   public static final String DIRECTORY_LISTING_JSON = "DirectoryListing";
   public static final String PARTIAL_LISTING_JSON = "partialListing";
   public static final String REMAINING_ENTRIES_JSON = "remainingEntries";
+
+  public static final String STORAGE_POLICIES_JSON = "BlockStoragePolicies";
+  public static final String STORAGE_POLICY_JSON = "BlockStoragePolicy";
 
   public static final int HTTP_TEMPORARY_REDIRECT = 307;
 
@@ -199,18 +216,22 @@ public class HttpFSFileSystem extends FileSystem
   private static final String HTTP_DELETE = "DELETE";
 
   @InterfaceAudience.Private
-  public static enum Operation {
+  public enum Operation {
     OPEN(HTTP_GET), GETFILESTATUS(HTTP_GET), LISTSTATUS(HTTP_GET),
     GETHOMEDIRECTORY(HTTP_GET), GETCONTENTSUMMARY(HTTP_GET),
     GETFILECHECKSUM(HTTP_GET),  GETFILEBLOCKLOCATIONS(HTTP_GET),
-    INSTRUMENTATION(HTTP_GET), GETACLSTATUS(HTTP_GET),
+    INSTRUMENTATION(HTTP_GET), GETACLSTATUS(HTTP_GET), GETTRASHROOT(HTTP_GET),
     APPEND(HTTP_POST), CONCAT(HTTP_POST), TRUNCATE(HTTP_POST),
     CREATE(HTTP_PUT), MKDIRS(HTTP_PUT), RENAME(HTTP_PUT), SETOWNER(HTTP_PUT),
     SETPERMISSION(HTTP_PUT), SETREPLICATION(HTTP_PUT), SETTIMES(HTTP_PUT),
     MODIFYACLENTRIES(HTTP_PUT), REMOVEACLENTRIES(HTTP_PUT),
     REMOVEDEFAULTACL(HTTP_PUT), REMOVEACL(HTTP_PUT), SETACL(HTTP_PUT),
     DELETE(HTTP_DELETE), SETXATTR(HTTP_PUT), GETXATTRS(HTTP_GET),
-    REMOVEXATTR(HTTP_PUT), LISTXATTRS(HTTP_GET), LISTSTATUS_BATCH(HTTP_GET);
+    REMOVEXATTR(HTTP_PUT), LISTXATTRS(HTTP_GET), LISTSTATUS_BATCH(HTTP_GET),
+    GETALLSTORAGEPOLICY(HTTP_GET), GETSTORAGEPOLICY(HTTP_GET),
+    SETSTORAGEPOLICY(HTTP_PUT), UNSETSTORAGEPOLICY(HTTP_POST),
+    CREATESNAPSHOT(HTTP_PUT), DELETESNAPSHOT(HTTP_DELETE),
+    RENAMESNAPSHOT(HTTP_PUT);
 
     private String httpMethod;
 
@@ -685,14 +706,13 @@ public class HttpFSFileSystem extends FileSystem
   }
 
   /**
-   * List the statuses of the files/directories in the given path if the path is
-   * a directory.
+   * Get {@link FileStatus} of files/directories in the given path. If path
+   * corresponds to a file then {@link FileStatus} of that file is returned.
+   * Else if path represents a directory then {@link FileStatus} of all
+   * files/directories inside given path is returned.
    *
    * @param f given path
-   *
-   * @return the statuses of the files/directories in the given patch
-   *
-   * @throws IOException
+   * @return the statuses of the files/directories in the given path
    */
   @Override
   public FileStatus[] listStatus(Path f) throws IOException {
@@ -705,6 +725,13 @@ public class HttpFSFileSystem extends FileSystem
     return toFileStatuses(json, f);
   }
 
+  /**
+   * Get {@link DirectoryEntries} of the given path. {@link DirectoryEntries}
+   * contains an array of {@link FileStatus}, as well as iteration information.
+   *
+   * @param f given path
+   * @return {@link DirectoryEntries} for given path
+   */
   @Override
   public DirectoryEntries listStatusBatch(Path f, byte[] token) throws
       FileNotFoundException, IOException {
@@ -815,6 +842,33 @@ public class HttpFSFileSystem extends FileSystem
       return new Path((String) json.get(HOME_DIR_JSON));
     } catch (IOException ex) {
       throw new RuntimeException(ex);
+    }
+  }
+
+  /**
+   * Get the root directory of Trash for a path in HDFS.
+   * 1. File in encryption zone returns /ez1/.Trash/username.
+   * 2. File not in encryption zone, or encountered exception when checking
+   *    the encryption zone of the path, returns /users/username/.Trash.
+   * Caller appends either Current or checkpoint timestamp
+   * for trash destination.
+   * The default implementation returns "/user/username/.Trash".
+   * @param fullPath the trash root of the path to be determined.
+   * @return trash root
+   */
+  @Override
+  public Path getTrashRoot(Path fullPath) {
+    Map<String, String> params = new HashMap<>();
+    params.put(OP_PARAM, Operation.GETTRASHROOT.toString());
+    try {
+      HttpURLConnection conn = getConnection(
+              Operation.GETTRASHROOT.getMethod(), params, fullPath, true);
+      HttpExceptionUtils.validateResponse(conn, HttpURLConnection.HTTP_OK);
+      JSONObject json = (JSONObject) HttpFSUtils.jsonParse(conn);
+      return new Path((String) json.get(TRASH_DIR_JSON));
+    } catch (IOException ex) {
+      LOG.warn("Cannot find trash root of " + fullPath, ex);
+      return super.getTrashRoot(fullPath);
     }
   }
 
@@ -1001,16 +1055,7 @@ public class HttpFSFileSystem extends FileSystem
   /** Convert a string to a FsPermission object. */
   static FsPermission toFsPermission(JSONObject json) {
     final String s = (String) json.get(PERMISSION_JSON);
-    final Boolean aclBit = (Boolean) json.get(ACL_BIT_JSON);
-    final Boolean encBit = (Boolean) json.get(ENC_BIT_JSON);
-    FsPermission perm = new FsPermission(Short.parseShort(s, 8));
-    final boolean aBit = (aclBit != null) ? aclBit : false;
-    final boolean eBit = (encBit != null) ? encBit : false;
-    if (aBit || eBit) {
-      return new FsPermissionExtension(perm, aBit, eBit);
-    } else {
-      return perm;
-    }
+    return new FsPermission(Short.parseShort(s, 8));
   }
 
   private FileStatus createFileStatus(Path parent, JSONObject json) {
@@ -1025,23 +1070,28 @@ public class HttpFSFileSystem extends FileSystem
     long mTime = (Long) json.get(MODIFICATION_TIME_JSON);
     long blockSize = (Long) json.get(BLOCK_SIZE_JSON);
     short replication = ((Long) json.get(REPLICATION_JSON)).shortValue();
-    FileStatus fileStatus = null;
 
-    switch (type) {
-      case FILE:
-      case DIRECTORY:
-        fileStatus = new FileStatus(len, (type == FILE_TYPE.DIRECTORY),
-                                    replication, blockSize, mTime, aTime,
-                                    permission, owner, group, path);
-        break;
-      case SYMLINK:
-        Path symLink = null;
-        fileStatus = new FileStatus(len, false,
-                                    replication, blockSize, mTime, aTime,
-                                    permission, owner, group, symLink,
-                                    path);
+    final Boolean aclBit = (Boolean) json.get(ACL_BIT_JSON);
+    final Boolean encBit = (Boolean) json.get(ENC_BIT_JSON);
+    final Boolean erasureBit = (Boolean) json.get(EC_BIT_JSON);
+    final Boolean snapshotEnabledBit = (Boolean) json.get(SNAPSHOT_BIT_JSON);
+    final boolean aBit = (aclBit != null) ? aclBit : false;
+    final boolean eBit = (encBit != null) ? encBit : false;
+    final boolean ecBit = (erasureBit != null) ? erasureBit : false;
+    final boolean seBit =
+        (snapshotEnabledBit != null) ? snapshotEnabledBit : false;
+    if (aBit || eBit || ecBit || seBit) {
+      // include this for compatibility with 2.x
+      FsPermissionExtension deprecatedPerm =
+          new FsPermissionExtension(permission, aBit, eBit, ecBit);
+      FileStatus fileStatus = new FileStatus(len, FILE_TYPE.DIRECTORY == type,
+          replication, blockSize, mTime, aTime, deprecatedPerm, owner, group,
+          null, path, FileStatus.attributes(aBit, eBit, ecBit, seBit));
+      return fileStatus;
+    } else {
+      return new FileStatus(len, FILE_TYPE.DIRECTORY == type,
+          replication, blockSize, mTime, aTime, permission, owner, group, path);
     }
-    return fileStatus;
   }
 
   /**
@@ -1281,4 +1331,123 @@ public class HttpFSFileSystem extends FileSystem
         params, f, true);
     HttpExceptionUtils.validateResponse(conn, HttpURLConnection.HTTP_OK);
   }
+
+  @Override
+  public Collection<BlockStoragePolicy> getAllStoragePolicies()
+      throws IOException {
+    Map<String, String> params = new HashMap<String, String>();
+    params.put(OP_PARAM, Operation.GETALLSTORAGEPOLICY.toString());
+    HttpURLConnection conn = getConnection(
+        Operation.GETALLSTORAGEPOLICY.getMethod(), params, new Path(getUri()
+            .toString(), "/"), false);
+    HttpExceptionUtils.validateResponse(conn, HttpURLConnection.HTTP_OK);
+    JSONObject json = (JSONObject) HttpFSUtils.jsonParse(conn);
+    return createStoragePolicies((JSONObject) json.get(STORAGE_POLICIES_JSON));
+  }
+
+  private Collection<BlockStoragePolicy> createStoragePolicies(JSONObject map)
+      throws IOException {
+    JSONArray jsonArray = (JSONArray) map.get(STORAGE_POLICY_JSON);
+    BlockStoragePolicy[] policies = new BlockStoragePolicy[jsonArray.size()];
+    for (int i = 0; i < jsonArray.size(); i++) {
+      policies[i] = createStoragePolicy((JSONObject) jsonArray.get(i));
+    }
+    return Arrays.asList(policies);
+  }
+
+  @Override
+  public BlockStoragePolicy getStoragePolicy(Path src) throws IOException {
+    Map<String, String> params = new HashMap<String, String>();
+    params.put(OP_PARAM, Operation.GETSTORAGEPOLICY.toString());
+    HttpURLConnection conn = getConnection(
+        Operation.GETSTORAGEPOLICY.getMethod(), params, src, true);
+    HttpExceptionUtils.validateResponse(conn, HttpURLConnection.HTTP_OK);
+    JSONObject json = (JSONObject) HttpFSUtils.jsonParse(conn);
+    return createStoragePolicy((JSONObject) json.get(STORAGE_POLICY_JSON));
+  }
+
+  private BlockStoragePolicy createStoragePolicy(JSONObject policyJson)
+      throws IOException {
+    byte id = ((Number) policyJson.get("id")).byteValue();
+    String name = (String) policyJson.get("name");
+    StorageType[] storageTypes = toStorageTypes((JSONArray) policyJson
+        .get("storageTypes"));
+    StorageType[] creationFallbacks = toStorageTypes((JSONArray) policyJson
+        .get("creationFallbacks"));
+    StorageType[] replicationFallbacks = toStorageTypes((JSONArray) policyJson
+        .get("replicationFallbacks"));
+    Boolean copyOnCreateFile = (Boolean) policyJson.get("copyOnCreateFile");
+    return new BlockStoragePolicy(id, name, storageTypes, creationFallbacks,
+        replicationFallbacks, copyOnCreateFile.booleanValue());
+  }
+
+  private StorageType[] toStorageTypes(JSONArray array) throws IOException {
+    if (array == null) {
+      return null;
+    } else {
+      List<StorageType> storageTypes = new ArrayList<StorageType>(array.size());
+      for (Object name : array) {
+        storageTypes.add(StorageType.parseStorageType((String) name));
+      }
+      return storageTypes.toArray(new StorageType[storageTypes.size()]);
+    }
+  }
+
+  @Override
+  public void setStoragePolicy(Path src, String policyName) throws IOException {
+    Map<String, String> params = new HashMap<String, String>();
+    params.put(OP_PARAM, Operation.SETSTORAGEPOLICY.toString());
+    params.put(POLICY_NAME_PARAM, policyName);
+    HttpURLConnection conn = getConnection(
+        Operation.SETSTORAGEPOLICY.getMethod(), params, src, true);
+    HttpExceptionUtils.validateResponse(conn, HttpURLConnection.HTTP_OK);
+  }
+
+  @Override
+  public void unsetStoragePolicy(Path src) throws IOException {
+    Map<String, String> params = new HashMap<String, String>();
+    params.put(OP_PARAM, Operation.UNSETSTORAGEPOLICY.toString());
+    HttpURLConnection conn = getConnection(
+        Operation.UNSETSTORAGEPOLICY.getMethod(), params, src, true);
+    HttpExceptionUtils.validateResponse(conn, HttpURLConnection.HTTP_OK);
+  }
+
+  @Override
+  public final Path createSnapshot(Path path, String snapshotName)
+      throws IOException {
+    Map<String, String> params = new HashMap<String, String>();
+    params.put(OP_PARAM, Operation.CREATESNAPSHOT.toString());
+    if (snapshotName != null) {
+      params.put(SNAPSHOT_NAME_PARAM, snapshotName);
+    }
+    HttpURLConnection conn = getConnection(Operation.CREATESNAPSHOT.getMethod(),
+        params, path, true);
+    HttpExceptionUtils.validateResponse(conn, HttpURLConnection.HTTP_OK);
+    JSONObject json = (JSONObject) HttpFSUtils.jsonParse(conn);
+    return new Path((String) json.get(SNAPSHOT_JSON));
+  }
+
+  @Override
+  public void renameSnapshot(Path path, String snapshotOldName,
+                             String snapshotNewName) throws IOException {
+    Map<String, String> params = new HashMap<String, String>();
+    params.put(OP_PARAM, Operation.RENAMESNAPSHOT.toString());
+    params.put(SNAPSHOT_NAME_PARAM, snapshotNewName);
+    params.put(OLD_SNAPSHOT_NAME_PARAM, snapshotOldName);
+    HttpURLConnection conn = getConnection(Operation.RENAMESNAPSHOT.getMethod(),
+        params, path, true);
+    HttpExceptionUtils.validateResponse(conn, HttpURLConnection.HTTP_OK);
+  }
+
+  @Override
+  public void deleteSnapshot(Path path, String snapshotName)
+      throws IOException {
+    Map<String, String> params = new HashMap<String, String>();
+    params.put(OP_PARAM, Operation.DELETESNAPSHOT.toString());
+    params.put(SNAPSHOT_NAME_PARAM, snapshotName);
+    HttpURLConnection conn = getConnection(Operation.DELETESNAPSHOT.getMethod(),
+        params, path, true);
+    HttpExceptionUtils.validateResponse(conn, HttpURLConnection.HTTP_OK);
+  }
+
 }

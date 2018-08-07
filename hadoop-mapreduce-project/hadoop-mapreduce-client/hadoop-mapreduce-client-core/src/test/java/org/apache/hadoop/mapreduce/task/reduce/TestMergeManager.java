@@ -43,9 +43,9 @@ import org.apache.hadoop.mapred.MapOutputFile;
 import org.apache.hadoop.mapreduce.MRJobConfig;
 import org.apache.hadoop.mapreduce.TaskAttemptID;
 import org.apache.hadoop.mapreduce.task.reduce.MergeManagerImpl.CompressAwarePath;
+import org.apache.hadoop.test.Whitebox;
 import org.junit.Assert;
 import org.junit.Test;
-import org.mockito.internal.util.reflection.Whitebox;
 
 public class TestMergeManager {
 
@@ -205,6 +205,13 @@ public class TestMergeManager {
     public int getNumExceptions() {
       return exceptions.size();
     }
+  }
+
+  @Test
+  public void testIoSortDefaults() {
+    final JobConf jobConf = new JobConf();
+    assertEquals(10, jobConf.getInt(MRJobConfig.IO_SORT_FACTOR, 100));
+    assertEquals(100, jobConf.getInt(MRJobConfig.IO_SORT_MB, 10));
   }
 
   @SuppressWarnings({ "unchecked", "deprecation" })

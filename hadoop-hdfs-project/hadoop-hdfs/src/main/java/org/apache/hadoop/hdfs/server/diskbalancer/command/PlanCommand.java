@@ -18,11 +18,15 @@
 package org.apache.hadoop.hdfs.server.diskbalancer.command;
 
 import com.google.common.base.Preconditions;
+import com.google.common.base.Throwables;
+
 import org.apache.commons.cli.CommandLine;
 import org.apache.commons.cli.HelpFormatter;
-import org.apache.commons.lang.StringUtils;
+import org.apache.commons.lang3.StringUtils;
+import org.apache.commons.text.TextStringBuilder;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.FSDataOutputStream;
+import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.hdfs.DFSConfigKeys;
 import org.apache.hadoop.hdfs.server.diskbalancer.datamodel
     .DiskBalancerDataNode;
@@ -31,6 +35,7 @@ import org.apache.hadoop.hdfs.server.diskbalancer.planner.Step;
 import org.apache.hadoop.hdfs.tools.DiskBalancerCLI;
 import java.nio.charset.StandardCharsets;
 import java.util.List;
+import java.io.PrintStream;
 
 /**
  * Class that implements Plan Command.
@@ -49,7 +54,14 @@ public class PlanCommand extends Command {
    * Constructs a plan command.
    */
   public PlanCommand(Configuration conf) {
-    super(conf);
+    this(conf, System.out);
+  }
+
+  /**
+   * Constructs a plan command.
+   */
+  public PlanCommand(Configuration conf, final PrintStream ps) {
+    super(conf, ps);
     this.thresholdPercentage = 1;
     this.bandwidth = 0;
     this.maxError = 0;
@@ -73,9 +85,12 @@ public class PlanCommand extends Command {
    * -plan -node IP -plan -node hostName -plan -node DatanodeUUID
    *
    * @param cmd - CommandLine
+   * @throws Exception
    */
   @Override
   public void execute(CommandLine cmd) throws Exception {
+    TextStringBuilder result = new TextStringBuilder();
+    String outputLine = "";
     LOG.debug("Processing Plan Command.");
     Preconditions.checkState(cmd.hasOption(DiskBalancerCLI.PLAN));
     verifyCommandOptions(DiskBalancerCLI.PLAN, cmd);
@@ -109,6 +124,14 @@ public class PlanCommand extends Command {
       throw new IllegalArgumentException("Unable to find the specified node. " +
           cmd.getOptionValue(DiskBalancerCLI.PLAN));
     }
+
+    try (FSDataOutputStream beforeStream = create(String.format(
+        DiskBalancerCLI.BEFORE_TEMPLATE,
+        cmd.getOptionValue(DiskBalancerCLI.PLAN)))) {
+      beforeStream.write(getCluster().toJson()
+          .getBytes(StandardCharsets.UTF_8));
+    }
+
     this.thresholdPercentage = getThresholdPercentage(cmd);
 
     LOG.debug("threshold Percentage is {}", this.thresholdPercentage);
@@ -123,30 +146,41 @@ public class PlanCommand extends Command {
       plan = plans.get(0);
     }
 
+    try {
+      if (plan != null && plan.getVolumeSetPlans().size() > 0) {
+        outputLine = String.format("Writing plan to:");
+        recordOutput(result, outputLine);
 
-    try (FSDataOutputStream beforeStream = create(String.format(
-        DiskBalancerCLI.BEFORE_TEMPLATE,
-        cmd.getOptionValue(DiskBalancerCLI.PLAN)))) {
-      beforeStream.write(getCluster().toJson()
-          .getBytes(StandardCharsets.UTF_8));
-    }
+        final String planFileName = String.format(
+            DiskBalancerCLI.PLAN_TEMPLATE,
+            cmd.getOptionValue(DiskBalancerCLI.PLAN));
+        final String planFileFullName =
+            new Path(getOutputPath(), planFileName).toString();
+        recordOutput(result, planFileFullName);
 
-    if (plan != null && plan.getVolumeSetPlans().size() > 0) {
-      LOG.info("Writing plan to : {}", getOutputPath());
-      try (FSDataOutputStream planStream = create(String.format(
-          DiskBalancerCLI.PLAN_TEMPLATE,
-          cmd.getOptionValue(DiskBalancerCLI.PLAN)))) {
-        planStream.write(plan.toJson().getBytes(StandardCharsets.UTF_8));
+        try (FSDataOutputStream planStream = create(planFileName)) {
+          planStream.write(plan.toJson().getBytes(StandardCharsets.UTF_8));
+        }
+      } else {
+        outputLine = String.format(
+            "No plan generated. DiskBalancing not needed for node: %s"
+                + " threshold used: %s",
+            cmd.getOptionValue(DiskBalancerCLI.PLAN), this.thresholdPercentage);
+        recordOutput(result, outputLine);
       }
-    } else {
-      LOG.info("No plan generated. DiskBalancing not needed for node: {} " +
-              "threshold used: {}", cmd.getOptionValue(DiskBalancerCLI.PLAN),
-          this.thresholdPercentage);
+
+      if (cmd.hasOption(DiskBalancerCLI.VERBOSE) && plans.size() > 0) {
+        printToScreen(plans);
+      }
+    } catch (Exception e) {
+      final String errMsg =
+          "Errors while recording the output of plan command.";
+      LOG.error(errMsg, e);
+      result.appendln(errMsg);
+      result.appendln(Throwables.getStackTraceAsString(e));
     }
 
-    if (cmd.hasOption(DiskBalancerCLI.VERBOSE) && plans.size() > 0) {
-      printToScreen(plans);
-    }
+    getPrintStream().print(result.toString());
   }
 
 

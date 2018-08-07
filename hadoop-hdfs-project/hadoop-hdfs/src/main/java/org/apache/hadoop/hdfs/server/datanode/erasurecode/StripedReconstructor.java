@@ -39,8 +39,7 @@ import java.net.InetSocketAddress;
 import java.nio.ByteBuffer;
 import java.util.BitSet;
 import java.util.concurrent.CompletionService;
-import java.util.concurrent.ExecutorCompletionService;
-import java.util.concurrent.ThreadPoolExecutor;
+import java.util.concurrent.atomic.AtomicLong;
 
 /**
  * StripedReconstructor reconstruct one or more missed striped block in the
@@ -109,14 +108,19 @@ abstract class StripedReconstructor {
   // position in striped internal block
   private long positionInBlock;
   private StripedReader stripedReader;
-  private ThreadPoolExecutor stripedReadPool;
+  private ErasureCodingWorker erasureCodingWorker;
   private final CachingStrategy cachingStrategy;
   private long maxTargetLength = 0L;
   private final BitSet liveBitSet;
 
+  // metrics
+  private AtomicLong bytesRead = new AtomicLong(0);
+  private AtomicLong bytesWritten = new AtomicLong(0);
+  private AtomicLong remoteBytesRead = new AtomicLong(0);
+
   StripedReconstructor(ErasureCodingWorker worker,
       StripedReconstructionInfo stripedReconInfo) {
-    this.stripedReadPool = worker.getStripedReadPool();
+    this.erasureCodingWorker = worker;
     this.datanode = worker.getDatanode();
     this.conf = worker.getConf();
     this.ecPolicy = stripedReconInfo.getEcPolicy();
@@ -127,10 +131,34 @@ abstract class StripedReconstructor {
     }
     blockGroup = stripedReconInfo.getBlockGroup();
     stripedReader = new StripedReader(this, datanode, conf, stripedReconInfo);
-
     cachingStrategy = CachingStrategy.newDefaultStrategy();
 
     positionInBlock = 0L;
+  }
+
+  public void incrBytesRead(boolean local, long delta) {
+    if (local) {
+      bytesRead.addAndGet(delta);
+    } else {
+      bytesRead.addAndGet(delta);
+      remoteBytesRead.addAndGet(delta);
+    }
+  }
+
+  public void incrBytesWritten(long delta) {
+    bytesWritten.addAndGet(delta);
+  }
+
+  public long getBytesRead() {
+    return bytesRead.get();
+  }
+
+  public long getRemoteBytesRead() {
+    return remoteBytesRead.get();
+  }
+
+  public long getBytesWritten() {
+    return bytesWritten.get();
   }
 
   /**
@@ -195,11 +223,18 @@ abstract class StripedReconstructor {
   }
 
   CompletionService<Void> createReadService() {
-    return new ExecutorCompletionService<>(stripedReadPool);
+    return erasureCodingWorker.createReadService();
   }
 
   ExtendedBlock getBlockGroup() {
     return blockGroup;
+  }
+
+  /**
+   * Get the xmits that _will_ be used for this reconstruction task.
+   */
+  int getXmits() {
+    return stripedReader.getXmits();
   }
 
   BitSet getLiveBitSet() {
@@ -220,6 +255,12 @@ abstract class StripedReconstructor {
 
   RawErasureDecoder getDecoder() {
     return decoder;
+  }
+
+  void cleanup() {
+    if (decoder != null) {
+      decoder.release();
+    }
   }
 
   StripedReader getStripedReader() {

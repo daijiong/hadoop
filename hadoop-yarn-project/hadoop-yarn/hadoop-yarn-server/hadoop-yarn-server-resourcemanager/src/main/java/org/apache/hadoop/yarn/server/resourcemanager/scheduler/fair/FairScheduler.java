@@ -18,30 +18,23 @@
 
 package org.apache.hadoop.yarn.server.resourcemanager.scheduler.fair;
 
-import java.io.IOException;
-import java.util.ArrayList;
-import java.util.Collection;
-import java.util.Comparator;
-import java.util.EnumSet;
-import java.util.HashSet;
-import java.util.Iterator;
-import java.util.List;
-import java.util.Set;
-import java.util.concurrent.ConcurrentHashMap;
-
+import com.google.common.annotations.VisibleForTesting;
+import com.google.common.base.Preconditions;
+import com.google.common.collect.Lists;
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.classification.InterfaceAudience.LimitedPrivate;
 import org.apache.hadoop.classification.InterfaceStability.Unstable;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.security.UserGroupInformation;
+import org.apache.hadoop.security.authorize.AccessControlList;
 import org.apache.hadoop.yarn.api.records.ApplicationAttemptId;
 import org.apache.hadoop.yarn.api.records.ApplicationId;
 import org.apache.hadoop.yarn.api.records.Container;
 import org.apache.hadoop.yarn.api.records.ContainerId;
 import org.apache.hadoop.yarn.api.records.ContainerStatus;
+import org.apache.hadoop.yarn.api.records.NMToken;
 import org.apache.hadoop.yarn.api.records.NodeId;
-import org.apache.hadoop.yarn.api.records.NodeState;
 import org.apache.hadoop.yarn.api.records.QueueACL;
 import org.apache.hadoop.yarn.api.records.QueueInfo;
 import org.apache.hadoop.yarn.api.records.QueueUserACLInfo;
@@ -49,16 +42,23 @@ import org.apache.hadoop.yarn.api.records.ReservationId;
 import org.apache.hadoop.yarn.api.records.Resource;
 import org.apache.hadoop.yarn.api.records.ResourceOption;
 import org.apache.hadoop.yarn.api.records.ResourceRequest;
-import org.apache.hadoop.yarn.api.records.UpdateContainerRequest;
+import org.apache.hadoop.yarn.api.records.SchedulingRequest;
 import org.apache.hadoop.yarn.conf.YarnConfiguration;
+import org.apache.hadoop.yarn.exceptions
+        .SchedulerInvalidResoureRequestException;
 import org.apache.hadoop.yarn.exceptions.YarnException;
 import org.apache.hadoop.yarn.exceptions.YarnRuntimeException;
 import org.apache.hadoop.yarn.proto.YarnServiceProtos.SchedulerResourceTypes;
+import org.apache.hadoop.yarn.security.AccessType;
+import org.apache.hadoop.yarn.security.Permission;
+import org.apache.hadoop.yarn.security.PrivilegedEntity;
+import org.apache.hadoop.yarn.security.PrivilegedEntity.EntityType;
+import org.apache.hadoop.yarn.security.YarnAuthorizationProvider;
 import org.apache.hadoop.yarn.server.api.protocolrecords.NMContainerStatus;
 import org.apache.hadoop.yarn.server.resourcemanager.RMContext;
+import org.apache.hadoop.yarn.server.resourcemanager.RMCriticalThreadUncaughtExceptionHandler;
 import org.apache.hadoop.yarn.server.resourcemanager.recovery.RMStateStore.RMState;
 import org.apache.hadoop.yarn.server.resourcemanager.reservation.ReservationConstants;
-import org.apache.hadoop.yarn.server.resourcemanager.resource.ResourceWeights;
 import org.apache.hadoop.yarn.server.resourcemanager.rmapp.RMApp;
 import org.apache.hadoop.yarn.server.resourcemanager.rmapp.RMAppEvent;
 import org.apache.hadoop.yarn.server.resourcemanager.rmapp.RMAppEventType;
@@ -70,16 +70,14 @@ import org.apache.hadoop.yarn.server.resourcemanager.rmcontainer.RMContainer;
 import org.apache.hadoop.yarn.server.resourcemanager.rmcontainer.RMContainerEventType;
 import org.apache.hadoop.yarn.server.resourcemanager.rmcontainer.RMContainerState;
 import org.apache.hadoop.yarn.server.resourcemanager.rmnode.RMNode;
-import org.apache.hadoop.yarn.server.resourcemanager.rmnode.RMNodeResourceUpdateEvent;
-import org.apache.hadoop.yarn.server.resourcemanager.rmnode.UpdatedContainerInfo;
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.AbstractYarnScheduler;
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.ActiveUsersManager;
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.Allocation;
+import org.apache.hadoop.yarn.server.resourcemanager.scheduler.ContainerUpdates;
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.QueueMetrics;
-import org.apache.hadoop.yarn.server.resourcemanager.scheduler.SchedContainerChangeRequest;
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.SchedulerApplication;
-import org.apache.hadoop.yarn.server.resourcemanager.scheduler.SchedulerApplicationAttempt;
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.SchedulerUtils;
+import org.apache.hadoop.yarn.server.resourcemanager.scheduler.SchedulerUtils.MaxResourceValidationResult;
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.common.QueueEntitlement;
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.event.AppAddedSchedulerEvent;
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.event.AppAttemptAddedSchedulerEvent;
@@ -90,17 +88,30 @@ import org.apache.hadoop.yarn.server.resourcemanager.scheduler.event.NodeAddedSc
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.event.NodeRemovedSchedulerEvent;
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.event.NodeResourceUpdateSchedulerEvent;
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.event.NodeUpdateSchedulerEvent;
+
+import org.apache.hadoop.yarn.server.resourcemanager.scheduler.event.ReleaseContainerEvent;
 import org.apache.hadoop.yarn.server.resourcemanager.scheduler.event.SchedulerEvent;
 import org.apache.hadoop.yarn.server.resourcemanager.security.RMContainerTokenSecretManager;
-import org.apache.hadoop.yarn.util.Clock;
-import org.apache.hadoop.yarn.util.SystemClock;
 import org.apache.hadoop.yarn.util.resource.DefaultResourceCalculator;
 import org.apache.hadoop.yarn.util.resource.DominantResourceCalculator;
 import org.apache.hadoop.yarn.util.resource.ResourceCalculator;
+import org.apache.hadoop.yarn.util.resource.ResourceUtils;
 import org.apache.hadoop.yarn.util.resource.Resources;
 
-import com.google.common.annotations.VisibleForTesting;
-import com.google.common.base.Preconditions;
+import java.io.IOException;
+import java.util.ArrayList;
+import java.util.Collection;
+import java.util.Collections;
+import java.util.Comparator;
+import java.util.EnumSet;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Map;
+import java.util.Map.Entry;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.locks.ReentrantReadWriteLock;
+import java.util.concurrent.locks.ReentrantReadWriteLock.ReadLock;
 
 /**
  * A scheduler that schedules resources between a set of queues. The scheduler
@@ -128,13 +139,16 @@ public class FairScheduler extends
     AbstractYarnScheduler<FSAppAttempt, FSSchedulerNode> {
   private FairSchedulerConfiguration conf;
 
+  private FSContext context;
+  private YarnAuthorizationProvider authorizer;
   private Resource incrAllocation;
   private QueueManager queueMgr;
-  private volatile Clock clock;
   private boolean usePortForNodeName;
 
   private static final Log LOG = LogFactory.getLog(FairScheduler.class);
-  
+  private static final Log STATE_DUMP_LOG =
+      LogFactory.getLog(FairScheduler.class.getName() + ".statedump");
+
   private static final ResourceCalculator RESOURCE_CALCULATOR =
       new DefaultResourceCalculator();
   private static final ResourceCalculator DOMINANT_RESOURCE_CALCULATOR =
@@ -144,60 +158,38 @@ public class FairScheduler extends
   // reserved
   public static final Resource CONTAINER_RESERVED = Resources.createResource(-1);
 
-  // How often fair shares are re-calculated (ms)
-  protected long updateInterval;
-  private final int UPDATE_DEBUG_FREQUENCY = 5;
+  private final int UPDATE_DEBUG_FREQUENCY = 25;
   private int updatesToSkipForDebug = UPDATE_DEBUG_FREQUENCY;
 
-  @VisibleForTesting
-  Thread updateThread;
-
-  private final Object updateThreadMonitor = new Object();
-
+  @Deprecated
   @VisibleForTesting
   Thread schedulingThread;
-  // timeout to join when we stop this service
-  protected final long THREAD_JOIN_TIMEOUT_MS = 1000;
+
+  Thread preemptionThread;
 
   // Aggregate metrics
   FSQueueMetrics rootMetrics;
   FSOpDurations fsOpDurations;
-
-  // Time when we last updated preemption vars
-  protected long lastPreemptionUpdateTime;
-  // Time we last ran preemptTasksIfNecessary
-  private long lastPreemptCheckTime;
-
-  // Preemption related variables
-  protected boolean preemptionEnabled;
-  protected float preemptionUtilizationThreshold;
-
-  // How often tasks are preempted
-  protected long preemptionInterval; 
-  
-  // ms to wait before force killing stuff (must be longer than a couple
-  // of heartbeats to give task-kill commands a chance to act).
-  protected long waitTimeBeforeKill; 
-  
-  // Containers whose AMs have been warned that they will be preempted soon.
-  private List<RMContainer> warnedContainers = new ArrayList<RMContainer>();
 
   private float reservableNodesRatio; // percentage of available nodes
                                       // an app can be reserved on
 
   protected boolean sizeBasedWeight; // Give larger weights to larger jobs
   // Continuous Scheduling enabled or not
+  @Deprecated
   protected boolean continuousSchedulingEnabled;
   // Sleep time for each pass in continuous scheduling
+  @Deprecated
   protected volatile int continuousSchedulingSleepMs;
   // Node available resource comparator
   private Comparator<FSSchedulerNode> nodeAvailableResourceComparator =
           new NodeAvailableResourceComparator();
   protected double nodeLocalityThreshold; // Cluster threshold for node locality
   protected double rackLocalityThreshold; // Cluster threshold for rack locality
+  @Deprecated
   protected long nodeLocalityDelayMs; // Delay for node locality
+  @Deprecated
   protected long rackLocalityDelayMs; // Delay for rack locality
-  private FairSchedulerEventLog eventLog; // Machine-readable event log
   protected boolean assignMultiple; // Allocate multiple containers per
                                     // heartbeat
   @VisibleForTesting
@@ -209,7 +201,7 @@ public class FairScheduler extends
 
   private AllocationFileLoaderService allocsLoader;
   @VisibleForTesting
-  AllocationConfiguration allocConf;
+  volatile AllocationConfiguration allocConf;
 
   // Container size threshold for making a reservation.
   @VisibleForTesting
@@ -217,10 +209,14 @@ public class FairScheduler extends
 
   public FairScheduler() {
     super(FairScheduler.class.getName());
-    clock = SystemClock.getInstance();
+    context = new FSContext(this);
     allocsLoader = new AllocationFileLoaderService();
     queueMgr = new QueueManager(this);
     maxRunningEnforcer = new MaxRunningAppsEnforcer(this);
+  }
+
+  public FSContext getContext() {
+    return context;
   }
 
   public boolean isAtLeastReservationThreshold(
@@ -229,12 +225,12 @@ public class FairScheduler extends
         getClusterResource(), resource, reservationThreshold);
   }
 
-  private void validateConf(Configuration conf) {
+  private void validateConf(FairSchedulerConfiguration config) {
     // validate scheduler memory allocation setting
-    int minMem = conf.getInt(
+    int minMem = config.getInt(
       YarnConfiguration.RM_SCHEDULER_MINIMUM_ALLOCATION_MB,
       YarnConfiguration.DEFAULT_RM_SCHEDULER_MINIMUM_ALLOCATION_MB);
-    int maxMem = conf.getInt(
+    int maxMem = config.getInt(
       YarnConfiguration.RM_SCHEDULER_MAXIMUM_ALLOCATION_MB,
       YarnConfiguration.DEFAULT_RM_SCHEDULER_MAXIMUM_ALLOCATION_MB);
 
@@ -249,11 +245,19 @@ public class FairScheduler extends
         + "the minimum allocation value.");
     }
 
+    long incrementMem = config.getIncrementAllocation().getMemorySize();
+    if (incrementMem <= 0) {
+      throw new YarnRuntimeException("Invalid resource scheduler memory"
+          + " allocation configuration: "
+          + FairSchedulerConfiguration.RM_SCHEDULER_INCREMENT_ALLOCATION_MB
+          + "=" + incrementMem + ". Values must be greater than 0.");
+    }
+
     // validate scheduler vcores allocation setting
-    int minVcores = conf.getInt(
+    int minVcores = config.getInt(
       YarnConfiguration.RM_SCHEDULER_MINIMUM_ALLOCATION_VCORES,
       YarnConfiguration.DEFAULT_RM_SCHEDULER_MINIMUM_ALLOCATION_VCORES);
-    int maxVcores = conf.getInt(
+    int maxVcores = config.getInt(
       YarnConfiguration.RM_SCHEDULER_MAXIMUM_ALLOCATION_VCORES,
       YarnConfiguration.DEFAULT_RM_SCHEDULER_MAXIMUM_ALLOCATION_VCORES);
 
@@ -266,6 +270,14 @@ public class FairScheduler extends
         + "=" + maxVcores + ".  Both values must be greater than or equal to 0"
           + "and the maximum allocation value must be greater than or equal to"
           + "the minimum allocation value.");
+    }
+
+    int incrementVcore = config.getIncrementAllocation().getVirtualCores();
+    if (incrementVcore <= 0) {
+      throw new YarnRuntimeException("Invalid resource scheduler vcores"
+          + " allocation configuration: "
+          + FairSchedulerConfiguration.RM_SCHEDULER_INCREMENT_ALLOCATION_VCORES
+          + "=" + incrementVcore + ". Values must be greater than 0.");
     }
   }
 
@@ -281,45 +293,11 @@ public class FairScheduler extends
     return queueMgr;
   }
 
-  // Allows UpdateThread to start processing without waiting till updateInterval
-  void triggerUpdate() {
-    synchronized (updateThreadMonitor) {
-      updateThreadMonitor.notify();
-    }
-  }
-
-  /**
-   * Thread which calls {@link FairScheduler#update()} every
-   * <code>updateInterval</code> milliseconds.
-   */
-  private class UpdateThread extends Thread {
-
-    @Override
-    public void run() {
-      while (!Thread.currentThread().isInterrupted()) {
-        try {
-          synchronized (updateThreadMonitor) {
-            updateThreadMonitor.wait(updateInterval);
-          }
-          long start = getClock().getTime();
-          update();
-          preemptTasksIfNecessary();
-          long duration = getClock().getTime() - start;
-          fsOpDurations.addUpdateThreadRunDuration(duration);
-        } catch (InterruptedException ie) {
-          LOG.warn("Update thread interrupted. Exiting.");
-          return;
-        } catch (Exception e) {
-          LOG.error("Exception in fair scheduler UpdateThread", e);
-        }
-      }
-    }
-  }
-
   /**
    * Thread which attempts scheduling resources continuously,
    * asynchronous to the node heartbeats.
    */
+  @Deprecated
   private class ContinuousSchedulingThread extends Thread {
 
     @Override
@@ -337,228 +315,67 @@ public class FairScheduler extends
   }
 
   /**
+   * Dump scheduler state including states of all queues.
+   */
+  private void dumpSchedulerState() {
+    FSQueue rootQueue = queueMgr.getRootQueue();
+    Resource clusterResource = getClusterResource();
+    STATE_DUMP_LOG.debug(
+        "FairScheduler state: Cluster Capacity: " + clusterResource +
+        "  Allocations: " + rootMetrics.getAllocatedResources() +
+        "  Availability: " + Resource.newInstance(
+            rootMetrics.getAvailableMB(),
+            rootMetrics.getAvailableVirtualCores()) +
+        "  Demand: " + rootQueue.getDemand());
+
+    STATE_DUMP_LOG.debug(rootQueue.dumpState());
+  }
+
+  /**
    * Recompute the internal variables used by the scheduler - per-job weights,
    * fair shares, deficits, minimum slot allocations, and amount of used and
    * required resources per job.
    */
-  protected void update() {
+  @VisibleForTesting
+  @Override
+  public void update() {
+    // Storing start time for fsOpDurations
+    long start = getClock().getTime();
+    FSQueue rootQueue = queueMgr.getRootQueue();
+
+    // Update demands and fairshares
+    writeLock.lock();
     try {
-      writeLock.lock();
-      long start = getClock().getTime();
-      updateStarvationStats(); // Determine if any queues merit preemption
-
-      FSQueue rootQueue = queueMgr.getRootQueue();
-
       // Recursively update demands for all queues
       rootQueue.updateDemand();
+      rootQueue.update(getClusterResource());
 
-      Resource clusterResource = getClusterResource();
-      rootQueue.setFairShare(clusterResource);
-      // Recursively compute fair shares for all queues
-      // and update metrics
-      rootQueue.recomputeShares();
+      // Update metrics
       updateRootQueueMetrics();
+    } finally {
+      writeLock.unlock();
+    }
 
-      if (LOG.isDebugEnabled()) {
+    readLock.lock();
+    try {
+      // Update starvation stats and identify starved applications
+      if (shouldAttemptPreemption()) {
+        for (FSLeafQueue queue : queueMgr.getLeafQueues()) {
+          queue.updateStarvedApps();
+        }
+      }
+
+      // Log debug information
+      if (STATE_DUMP_LOG.isDebugEnabled()) {
         if (--updatesToSkipForDebug < 0) {
           updatesToSkipForDebug = UPDATE_DEBUG_FREQUENCY;
-          LOG.debug("Cluster Capacity: " + clusterResource + "  Allocations: "
-              + rootMetrics.getAllocatedResources() + "  Availability: "
-              + Resource.newInstance(rootMetrics.getAvailableMB(),
-              rootMetrics.getAvailableVirtualCores()) + "  Demand: " + rootQueue
-              .getDemand());
-        }
-      }
-
-      long duration = getClock().getTime() - start;
-      fsOpDurations.addUpdateCallDuration(duration);
-    } finally {
-      writeLock.unlock();
-    }
-  }
-
-  /**
-   * Update the preemption fields for all QueueScheduables, i.e. the times since
-   * each queue last was at its guaranteed share and over its fair share
-   * threshold for each type of task.
-   */
-  private void updateStarvationStats() {
-    lastPreemptionUpdateTime = clock.getTime();
-    for (FSLeafQueue sched : queueMgr.getLeafQueues()) {
-      sched.updateStarvationStats();
-    }
-  }
-
-  /**
-   * Check for queues that need tasks preempted, either because they have been
-   * below their guaranteed share for minSharePreemptionTimeout or they have
-   * been below their fair share threshold for the fairSharePreemptionTimeout. If
-   * such queues exist, compute how many tasks of each type need to be preempted
-   * and then select the right ones using preemptTasks.
-   */
-  protected void preemptTasksIfNecessary() {
-    try {
-      writeLock.lock();
-      if (!shouldAttemptPreemption()) {
-        return;
-      }
-
-      long curTime = getClock().getTime();
-      if (curTime - lastPreemptCheckTime < preemptionInterval) {
-        return;
-      }
-      lastPreemptCheckTime = curTime;
-
-      Resource resToPreempt = Resources.clone(Resources.none());
-      for (FSLeafQueue sched : queueMgr.getLeafQueues()) {
-        Resources.addTo(resToPreempt, resourceDeficit(sched, curTime));
-      }
-      if (isResourceGreaterThanNone(resToPreempt)) {
-        preemptResources(resToPreempt);
-      }
-    } finally {
-      writeLock.unlock();
-    }
-  }
-
-  /**
-   * Preempt a quantity of resources. Each round, we start from the root queue,
-   * level-by-level, until choosing a candidate application.
-   * The policy for prioritizing preemption for each queue depends on its
-   * SchedulingPolicy: (1) fairshare/DRF, choose the ChildSchedulable that is
-   * most over its fair share; (2) FIFO, choose the childSchedulable that is
-   * latest launched.
-   * Inside each application, we further prioritize preemption by choosing
-   * containers with lowest priority to preempt.
-   * We make sure that no queue is placed below its fair share in the process.
-   */
-  protected void preemptResources(Resource toPreempt) {
-    long start = getClock().getTime();
-    if (Resources.equals(toPreempt, Resources.none())) {
-      return;
-    }
-
-    // Scan down the list of containers we've already warned and kill them
-    // if we need to.  Remove any containers from the list that we don't need
-    // or that are no longer running.
-    Iterator<RMContainer> warnedIter = warnedContainers.iterator();
-    while (warnedIter.hasNext()) {
-      RMContainer container = warnedIter.next();
-      if ((container.getState() == RMContainerState.RUNNING ||
-              container.getState() == RMContainerState.ALLOCATED) &&
-              isResourceGreaterThanNone(toPreempt)) {
-        warnOrKillContainer(container);
-        Resources.subtractFrom(toPreempt, container.getContainer().getResource());
-      } else {
-        warnedIter.remove();
-      }
-    }
-
-    try {
-      // Reset preemptedResource for each app
-      for (FSLeafQueue queue : getQueueManager().getLeafQueues()) {
-        queue.resetPreemptedResources();
-      }
-
-      while (isResourceGreaterThanNone(toPreempt)) {
-        RMContainer container =
-            getQueueManager().getRootQueue().preemptContainer();
-        if (container == null) {
-          break;
-        } else {
-          warnOrKillContainer(container);
-          warnedContainers.add(container);
-          Resources.subtractFrom(
-              toPreempt, container.getContainer().getResource());
+          dumpSchedulerState();
         }
       }
     } finally {
-      // Clear preemptedResources for each app
-      for (FSLeafQueue queue : getQueueManager().getLeafQueues()) {
-        queue.clearPreemptedResources();
-      }
+      readLock.unlock();
     }
-
-    long duration = getClock().getTime() - start;
-    fsOpDurations.addPreemptCallDuration(duration);
-  }
-
-  private boolean isResourceGreaterThanNone(Resource toPreempt) {
-    return (toPreempt.getMemorySize() > 0) || (toPreempt.getVirtualCores() > 0);
-  }
-
-  protected void warnOrKillContainer(RMContainer container) {
-    ApplicationAttemptId appAttemptId = container.getApplicationAttemptId();
-    FSAppAttempt app = getSchedulerApp(appAttemptId);
-    FSLeafQueue queue = app.getQueue();
-    LOG.info("Preempting container (prio=" + container.getContainer().getPriority() +
-        "res=" + container.getContainer().getResource() +
-        ") from queue " + queue.getName());
-    
-    Long time = app.getContainerPreemptionTime(container);
-
-    if (time != null) {
-      // if we asked for preemption more than maxWaitTimeBeforeKill ms ago,
-      // proceed with kill
-      if (time + waitTimeBeforeKill < getClock().getTime()) {
-        ContainerStatus status =
-          SchedulerUtils.createPreemptedContainerStatus(
-            container.getContainerId(), SchedulerUtils.PREEMPTED_CONTAINER);
-
-        // TODO: Not sure if this ever actually adds this to the list of cleanup
-        // containers on the RMNode (see SchedulerNode.releaseContainer()).
-        super.completedContainer(container, status, RMContainerEventType.KILL);
-        if (LOG.isDebugEnabled()) {
-          LOG.debug("Killing container" + container +
-                  " (after waiting for preemption for " +
-                  (getClock().getTime() - time) + "ms)");
-        }
-      }
-    } else {
-      // track the request in the FSAppAttempt itself
-      app.addPreemption(container, getClock().getTime());
-    }
-  }
-
-  /**
-   * Return the resource amount that this queue is allowed to preempt, if any.
-   * If the queue has been below its min share for at least its preemption
-   * timeout, it should preempt the difference between its current share and
-   * this min share. If it has been below its fair share preemption threshold
-   * for at least the fairSharePreemptionTimeout, it should preempt enough tasks
-   * to get up to its full fair share. If both conditions hold, we preempt the
-   * max of the two amounts (this shouldn't happen unless someone sets the
-   * timeouts to be identical for some reason).
-   */
-  protected Resource resourceDeficit(FSLeafQueue sched, long curTime) {
-    long minShareTimeout = sched.getMinSharePreemptionTimeout();
-    long fairShareTimeout = sched.getFairSharePreemptionTimeout();
-    Resource resDueToMinShare = Resources.none();
-    Resource resDueToFairShare = Resources.none();
-    ResourceCalculator calc = sched.getPolicy().getResourceCalculator();
-    Resource clusterResource = getClusterResource();
-    if (curTime - sched.getLastTimeAtMinShare() > minShareTimeout) {
-      Resource target = Resources.componentwiseMin(
-          sched.getMinShare(), sched.getDemand());
-      resDueToMinShare = Resources.max(calc, clusterResource,
-          Resources.none(), Resources.subtract(target, sched.getResourceUsage()));
-    }
-    if (curTime - sched.getLastTimeAtFairShareThreshold() > fairShareTimeout) {
-      Resource target = Resources.componentwiseMin(
-              sched.getFairShare(), sched.getDemand());
-      resDueToFairShare = Resources.max(calc, clusterResource,
-          Resources.none(), Resources.subtract(target, sched.getResourceUsage()));
-    }
-    Resource deficit = Resources.max(calc, clusterResource,
-        resDueToMinShare, resDueToFairShare);
-    if (Resources.greaterThan(calc, clusterResource,
-        deficit, Resources.none())) {
-      String message = "Should preempt " + deficit + " res for queue "
-          + sched.getName() + ": resDueToMinShare = " + resDueToMinShare
-          + ", resDueToFairShare = " + resDueToFairShare;
-      LOG.info(message);
-    }
-    return deficit;
+    fsOpDurations.addUpdateThreadRunDuration(getClock().getTime() - start);
   }
 
   public RMContainerTokenSecretManager
@@ -566,22 +383,8 @@ public class FairScheduler extends
     return rmContext.getContainerTokenSecretManager();
   }
 
-  public ResourceWeights getAppWeight(FSAppAttempt app) {
-    try {
-      readLock.lock();
-      double weight = 1.0;
-      if (sizeBasedWeight) {
-        // Set weight based on current memory demand
-        weight = Math.log1p(app.getDemand().getMemorySize()) / Math.log(2);
-      }
-      weight *= app.getPriority().getPriority();
-      ResourceWeights resourceWeights = app.getResourceWeights();
-      resourceWeights.setWeight((float) weight);
-      return resourceWeights;
-    } finally {
-      readLock.unlock();
-    }
-
+  public boolean isSizeBasedWeight() {
+    return sizeBasedWeight;
   }
 
   public Resource getIncrementResourceCapability() {
@@ -600,33 +403,46 @@ public class FairScheduler extends
     return rackLocalityThreshold;
   }
 
+  /**
+   * Delay in milliseconds for locality fallback node to rack.
+   * @deprecated linked to {@link #isContinuousSchedulingEnabled} deprecation
+   * @return delay in ms
+   */
+  @Deprecated
   public long getNodeLocalityDelayMs() {
     return nodeLocalityDelayMs;
   }
 
+  /**
+   * Delay in milliseconds for locality fallback rack to other.
+   * @deprecated linked to {@link #isContinuousSchedulingEnabled} deprecation
+   * @return delay in ms
+   */
+  @Deprecated
   public long getRackLocalityDelayMs() {
     return rackLocalityDelayMs;
   }
 
+  /**
+   * Whether continuous scheduling is turned on.
+   * @deprecated Continuous scheduling should not be turned ON. It is
+   * deprecated because it can cause scheduler slowness due to locking issues.
+   * Schedulers should use assignmultiple as a replacement.
+   * @return whether continuous scheduling is enabled
+   */
+  @Deprecated
   public boolean isContinuousSchedulingEnabled() {
     return continuousSchedulingEnabled;
   }
 
+  /**
+   * The sleep time of the continuous scheduler thread.
+   * @deprecated linked to {@link #isContinuousSchedulingEnabled} deprecation
+   * @return sleep time in ms
+   */
+  @Deprecated
   public int getContinuousSchedulingSleepMs() {
     return continuousSchedulingSleepMs;
-  }
-
-  public Clock getClock() {
-    return clock;
-  }
-
-  @VisibleForTesting
-  void setClock(Clock clock) {
-    this.clock = clock;
-  }
-
-  public FairSchedulerEventLog getEventLog() {
-    return eventLog;
   }
 
   /**
@@ -640,10 +456,7 @@ public class FairScheduler extends
       String message =
           "Reject application " + applicationId + " submitted by user " + user
               + " with an empty queue name.";
-      LOG.info(message);
-      rmContext.getDispatcher().getEventHandler().handle(
-          new RMAppEvent(applicationId, RMAppEventType.APP_REJECTED,
-              message));
+      rejectApplicationWithMessage(applicationId, message);
       return;
     }
 
@@ -652,19 +465,41 @@ public class FairScheduler extends
           "Reject application " + applicationId + " submitted by user " + user
               + " with an illegal queue name " + queueName + ". "
               + "The queue name cannot start/end with period.";
-      LOG.info(message);
-      rmContext.getDispatcher().getEventHandler().handle(
-          new RMAppEvent(applicationId, RMAppEventType.APP_REJECTED,
-              message));
+      rejectApplicationWithMessage(applicationId, message);
       return;
     }
 
+    writeLock.lock();
     try {
-      writeLock.lock();
       RMApp rmApp = rmContext.getRMApps().get(applicationId);
       FSLeafQueue queue = assignToQueue(rmApp, queueName, user);
       if (queue == null) {
         return;
+      }
+
+      if (rmApp != null && rmApp.getAMResourceRequests() != null) {
+        // Resources.fitsIn would always return false when queueMaxShare is 0
+        // for any resource, but only using Resources.fitsIn is not enough
+        // is it would return false for such cases when the requested
+        // resource is smaller than the max resource but that max resource is
+        // not zero, e.g. requested vCores = 2, max vCores = 1.
+        // With this check, we only reject those applications where resource
+        // requested is greater than 0 and we have 0
+        // of that resource on the queue.
+        List<MaxResourceValidationResult> invalidAMResourceRequests =
+                validateResourceRequests(rmApp.getAMResourceRequests(), queue);
+
+        if (!invalidAMResourceRequests.isEmpty()) {
+          String msg = String.format(
+                  "Cannot submit application %s to queue %s because "
+                          + "it has zero amount of resource for a requested "
+                          + "resource! Invalid requested AM resources: %s, "
+                          + "maximum queue resources: %s",
+                  applicationId, queue.getName(),
+                  invalidAMResourceRequests, queue.getMaxShare());
+          rejectApplicationWithMessage(applicationId, msg);
+          return;
+        }
       }
 
       // Enforce ACLs
@@ -676,9 +511,7 @@ public class FairScheduler extends
         String msg = "User " + userUgi.getUserName()
             + " cannot submit applications to queue " + queue.getName()
             + "(requested queuename is " + queueName + ")";
-        LOG.info(msg);
-        rmContext.getDispatcher().getEventHandler().handle(
-            new RMAppEvent(applicationId, RMAppEventType.APP_REJECTED, msg));
+        rejectApplicationWithMessage(applicationId, msg);
         return;
       }
 
@@ -686,16 +519,24 @@ public class FairScheduler extends
           new SchedulerApplication<FSAppAttempt>(queue, user);
       applications.put(applicationId, application);
       queue.getMetrics().submitApp(user);
+      queue.addAssignedApp(applicationId);
 
-        LOG.info("Accepted application " + applicationId + " from user: " + user
-            + ", in queue: " + queue.getName()
-            + ", currently num of applications: " + applications.size());
+      LOG.info("Accepted application " + applicationId + " from user: " + user
+          + ", in queue: " + queue.getName()
+          + ", currently num of applications: " + applications.size());
       if (isAppRecovering) {
         if (LOG.isDebugEnabled()) {
           LOG.debug(applicationId
               + " is recovering. Skip notifying APP_ACCEPTED");
         }
-      } else{
+      } else {
+        // During tests we do not always have an application object, handle
+        // it here but we probably should fix the tests
+        if (rmApp != null && rmApp.getApplicationSubmissionContext() != null) {
+          // Before we send out the event that the app is accepted is
+          // to set the queue in the submissionContext (needed on restore etc)
+          rmApp.getApplicationSubmissionContext().setQueue(queue.getName());
+        }
         rmContext.getDispatcher().getEventHandler().handle(
             new RMAppEvent(applicationId, RMAppEventType.APP_ACCEPTED));
       }
@@ -711,8 +552,8 @@ public class FairScheduler extends
       ApplicationAttemptId applicationAttemptId,
       boolean transferStateFromPreviousAttempt,
       boolean isAttemptRecovering) {
+    writeLock.lock();
     try {
-      writeLock.lock();
       SchedulerApplication<FSAppAttempt> application = applications.get(
           applicationAttemptId.getApplicationId());
       String user = application.getUser();
@@ -726,7 +567,7 @@ public class FairScheduler extends
       }
       application.setCurrentAppAttempt(attempt);
 
-      boolean runnable = maxRunningEnforcer.canAppBeRunnable(queue, user);
+      boolean runnable = maxRunningEnforcer.canAppBeRunnable(queue, attempt);
       queue.addApp(attempt, runnable);
       if (runnable) {
         maxRunningEnforcer.trackRunnableApp(attempt);
@@ -774,17 +615,21 @@ public class FairScheduler extends
           appRejectMsg = queueName + " is not a leaf queue";
         }
       }
+    } catch (IllegalStateException se) {
+      appRejectMsg = "Unable to match app " + rmApp.getApplicationId() +
+          " to a queue placement policy, and no valid terminal queue " +
+          " placement rule is configured. Please contact an administrator " +
+          " to confirm that the fair scheduler configuration contains a " +
+          " valid terminal queue placement rule.";
     } catch (InvalidQueueNameException qne) {
       appRejectMsg = qne.getMessage();
     } catch (IOException ioe) {
-      appRejectMsg = "Error assigning app to queue " + queueName;
+      // IOException should only happen for a user without groups
+      appRejectMsg = "Error assigning app to a queue: " + ioe.getMessage();
     }
 
     if (appRejectMsg != null && rmApp != null) {
-      LOG.error(appRejectMsg);
-      rmContext.getDispatcher().getEventHandler().handle(
-          new RMAppEvent(rmApp.getApplicationId(),
-              RMAppEventType.APP_REJECTED, appRejectMsg));
+      rejectApplicationWithMessage(rmApp.getApplicationId(), appRejectMsg);
       return null;
     }
 
@@ -810,16 +655,22 @@ public class FairScheduler extends
   private void removeApplicationAttempt(
       ApplicationAttemptId applicationAttemptId,
       RMAppAttemptState rmAppAttemptFinalState, boolean keepContainers) {
+    writeLock.lock();
     try {
-      writeLock.lock();
-      LOG.info(
-          "Application " + applicationAttemptId + " is done." + " finalState="
+      LOG.info("Application " + applicationAttemptId + " is done. finalState="
               + rmAppAttemptFinalState);
       FSAppAttempt attempt = getApplicationAttempt(applicationAttemptId);
 
       if (attempt == null) {
         LOG.info(
             "Unknown application " + applicationAttemptId + " has completed!");
+        return;
+      }
+
+      // Check if the attempt is already stopped and don't stop it twice.
+      if (attempt.isStopped()) {
+        LOG.info("Application " + applicationAttemptId + " has already been "
+            + "stopped!");
         return;
       }
 
@@ -871,8 +722,8 @@ public class FairScheduler extends
   protected void completedContainerInternal(
       RMContainer rmContainer, ContainerStatus containerStatus,
       RMContainerEventType event) {
+    writeLock.lock();
     try {
-      writeLock.lock();
       Container container = rmContainer.getContainer();
 
       // Get the application for the finished container
@@ -881,27 +732,36 @@ public class FairScheduler extends
       ApplicationId appId =
           container.getId().getApplicationAttemptId().getApplicationId();
       if (application == null) {
-        LOG.info(
-            "Container " + container + " of" + " finished application " + appId
-                + " completed with event " + event);
+        LOG.info("Container " + container + " of finished application " +
+            appId + " completed with event " + event);
         return;
       }
 
       // Get the node on which the container was allocated
-      FSSchedulerNode node = getFSSchedulerNode(container.getNodeId());
-
+      NodeId nodeID = container.getNodeId();
+      FSSchedulerNode node = getFSSchedulerNode(nodeID);
+      // node could be null if the thread was waiting for the lock and the node
+      // was removed in another thread
       if (rmContainer.getState() == RMContainerState.RESERVED) {
-        application.unreserve(rmContainer.getReservedSchedulerKey(), node);
-      } else{
+        if (node != null) {
+          application.unreserve(rmContainer.getReservedSchedulerKey(), node);
+        } else if (LOG.isDebugEnabled()) {
+          LOG.debug("Skipping unreserve on removed node: " + nodeID);
+        }
+      } else {
         application.containerCompleted(rmContainer, containerStatus, event);
-        node.releaseContainer(container);
+        if (node != null) {
+          node.releaseContainer(rmContainer.getContainerId(), false);
+        } else if (LOG.isDebugEnabled()) {
+          LOG.debug("Skipping container release on removed node: " + nodeID);
+        }
         updateRootQueueMetrics();
       }
 
       if (LOG.isDebugEnabled()) {
         LOG.debug("Application attempt " + application.getApplicationAttemptId()
-            + " released container " + container.getId() + " on node: " + node
-            + " with event: " + event);
+            + " released container " + container.getId() + " on node: " +
+            (node == null ? nodeID : node) + " with event: " + event);
       }
     } finally {
       writeLock.unlock();
@@ -910,8 +770,8 @@ public class FairScheduler extends
 
   private void addNode(List<NMContainerStatus> containerReports,
       RMNode node) {
+    writeLock.lock();
     try {
-      writeLock.lock();
       FSSchedulerNode schedulerNode = new FSSchedulerNode(node,
           usePortForNodeName);
       nodeTracker.addNode(schedulerNode);
@@ -932,8 +792,8 @@ public class FairScheduler extends
   }
 
   private void removeNode(RMNode rmNode) {
+    writeLock.lock();
     try {
-      writeLock.lock();
       NodeId nodeId = rmNode.getNodeID();
       FSSchedulerNode node = nodeTracker.getNode(nodeId);
       if (node == null) {
@@ -973,24 +833,73 @@ public class FairScheduler extends
   }
 
   @Override
-  public Allocation allocate(ApplicationAttemptId appAttemptId,
-      List<ResourceRequest> ask, List<ContainerId> release,
-      List<String> blacklistAdditions, List<String> blacklistRemovals,
-      List<UpdateContainerRequest> increaseRequests,
-      List<UpdateContainerRequest> decreaseRequests) {
+  public Resource getNormalizedResource(Resource requestedResource) {
+    return SchedulerUtils.getNormalizedResource(requestedResource,
+        DOMINANT_RESOURCE_CALCULATOR,
+        minimumAllocation,
+        getMaximumResourceCapability(),
+        incrAllocation);
+  }
 
+  @VisibleForTesting
+  @Override
+  public void killContainer(RMContainer container) {
+    ContainerStatus status = SchedulerUtils.createKilledContainerStatus(
+        container.getContainerId(),
+        "Killed by RM to simulate an AM container failure");
+    LOG.info("Killing container " + container);
+    completedContainer(container, status, RMContainerEventType.KILL);
+  }
+
+  @Override
+  public Allocation allocate(ApplicationAttemptId appAttemptId,
+      List<ResourceRequest> ask, List<SchedulingRequest> schedulingRequests,
+      List<ContainerId> release, List<String> blacklistAdditions,
+      List<String> blacklistRemovals, ContainerUpdates updateRequests) {
     // Make sure this application exists
     FSAppAttempt application = getSchedulerApp(appAttemptId);
     if (application == null) {
-      LOG.info("Calling allocate on removed " +
-          "or non existent application " + appAttemptId);
+      LOG.error("Calling allocate on removed or non existent application " +
+          appAttemptId.getApplicationId());
       return EMPTY_ALLOCATION;
     }
 
+    // The allocate may be the leftover from previous attempt, and it will
+    // impact current attempt, such as confuse the request and allocation for
+    // current attempt's AM container.
+    // Note outside precondition check for the attempt id may be
+    // outdated here, so double check it here is necessary.
+    if (!application.getApplicationAttemptId().equals(appAttemptId)) {
+      LOG.error("Calling allocate on previous or removed " +
+          "or non existent application attempt " + appAttemptId);
+      return EMPTY_ALLOCATION;
+    }
+
+    ApplicationId applicationId = application.getApplicationId();
+    FSLeafQueue queue = application.getQueue();
+    List<MaxResourceValidationResult> invalidAsks =
+            validateResourceRequests(ask, queue);
+
+    // We need to be fail-fast here if any invalid ask is detected.
+    // If we would have thrown exception later, this could be problematic as
+    // tokens and promoted / demoted containers would have been lost because
+    // scheduler would clear them right away and AM
+    // would not get this information.
+    if (!invalidAsks.isEmpty()) {
+      throw new SchedulerInvalidResoureRequestException(String.format(
+              "Resource request is invalid for application %s because queue %s "
+                      + "has 0 amount of resource for a resource type! "
+                      + "Validation result: %s",
+              applicationId, queue.getName(), invalidAsks));
+    }
+
+    // Handle promotions and demotions
+    handleContainerUpdates(application, updateRequests);
+
     // Sanity check
-    SchedulerUtils.normalizeRequests(ask, DOMINANT_RESOURCE_CALCULATOR,
-        getClusterResource(), minimumAllocation, getMaximumResourceCapability(),
-        incrAllocation);
+    normalizeResourceRequests(ask);
+
+    // TODO, normalize SchedulingRequest
 
     // Record container allocation start time
     application.recordContainerRequestTime(getClock().getTime());
@@ -998,8 +907,9 @@ public class FairScheduler extends
     // Release containers
     releaseContainers(release, application);
 
+    ReentrantReadWriteLock.WriteLock lock = application.getWriteLock();
+    lock.lock();
     try {
-      application.getWriteLock().lock();
       if (!ask.isEmpty()) {
         if (LOG.isDebugEnabled()) {
           LOG.debug(
@@ -1011,25 +921,23 @@ public class FairScheduler extends
         // Update application requests
         application.updateResourceRequests(ask);
 
+        // TODO, handle SchedulingRequest
         application.showRequests();
       }
     } finally {
-      application.getWriteLock().unlock();
+      lock.unlock();
     }
 
+    Set<ContainerId> preemptionContainerIds =
+        application.getPreemptionContainerIds();
     if (LOG.isDebugEnabled()) {
       LOG.debug(
           "allocate: post-update" + " applicationAttemptId=" + appAttemptId
               + " #ask=" + ask.size() + " reservation= " + application
               .getCurrentReservation());
 
-      LOG.debug("Preempting " + application.getPreemptionContainers().size()
+      LOG.debug("Preempting " + preemptionContainerIds.size()
           + " container(s)");
-    }
-
-    Set<ContainerId> preemptionContainerIds = new HashSet<ContainerId>();
-    for (RMContainer container : application.getPreemptionContainers()) {
-      preemptionContainerIds.add(container.getContainerId());
     }
 
     application.updateBlacklist(blacklistAdditions, blacklistRemovals);
@@ -1043,71 +951,55 @@ public class FairScheduler extends
 
     Resource headroom = application.getHeadroom();
     application.setApplicationHeadroomForMetrics(headroom);
+
+    List<Container> previousAttemptContainers = application
+        .pullPreviousAttemptContainers();
+    List<NMToken> updatedNMTokens = application.pullUpdatedNMTokens();
     return new Allocation(newlyAllocatedContainers, headroom,
         preemptionContainerIds, null, null,
-        application.pullUpdatedNMTokens());
+        updatedNMTokens, null, null,
+        application.pullNewlyPromotedContainers(),
+        application.pullNewlyDemotedContainers(),
+        previousAttemptContainers);
   }
-  
-  /**
-   * Process a heartbeat update from a node.
-   */
-  private void nodeUpdate(RMNode nm) {
+
+  private List<MaxResourceValidationResult> validateResourceRequests(
+      List<ResourceRequest> requests, FSLeafQueue queue) {
+    List<MaxResourceValidationResult> validationResults = Lists.newArrayList();
+
+    for (ResourceRequest resourceRequest : requests) {
+      if (LOG.isTraceEnabled()) {
+        LOG.trace("Validating resource request: " + resourceRequest);
+      }
+
+      MaxResourceValidationResult validationResult =
+              SchedulerUtils.validateResourceRequestsAgainstQueueMaxResource(
+                      resourceRequest, queue.getMaxShare());
+      if (!validationResult.isValid()) {
+        validationResults.add(validationResult);
+        LOG.warn(String.format("Queue %s cannot handle resource request" +
+                        "because it has zero available amount of resource " +
+                        "for a requested resource type, " +
+                        "so the resource request is ignored!"
+                        + " Requested resources: %s, " +
+                        "maximum queue resources: %s",
+                queue.getName(), resourceRequest.getCapability(),
+                queue.getMaxShare()));
+      }
+    }
+
+    return validationResults;
+  }
+
+  @Override
+  protected void nodeUpdate(RMNode nm) {
+    writeLock.lock();
     try {
-      writeLock.lock();
       long start = getClock().getTime();
-      if (LOG.isDebugEnabled()) {
-        LOG.debug(
-            "nodeUpdate: " + nm + " cluster capacity: " + getClusterResource());
-      }
-      eventLog.log("HEARTBEAT", nm.getHostName());
-      FSSchedulerNode node = getFSSchedulerNode(nm.getNodeID());
+      super.nodeUpdate(nm);
 
-      List<UpdatedContainerInfo> containerInfoList = nm.pullContainerUpdates();
-      List<ContainerStatus> newlyLaunchedContainers =
-          new ArrayList<ContainerStatus>();
-      List<ContainerStatus> completedContainers =
-          new ArrayList<ContainerStatus>();
-      for (UpdatedContainerInfo containerInfo : containerInfoList) {
-        newlyLaunchedContainers.addAll(
-            containerInfo.getNewlyLaunchedContainers());
-        completedContainers.addAll(containerInfo.getCompletedContainers());
-      }
-      // Processing the newly launched containers
-      for (ContainerStatus launchedContainer : newlyLaunchedContainers) {
-        containerLaunchedOnNode(launchedContainer.getContainerId(), node);
-      }
-
-      // Process completed containers
-      for (ContainerStatus completedContainer : completedContainers) {
-        ContainerId containerId = completedContainer.getContainerId();
-        LOG.debug("Container FINISHED: " + containerId);
-        super.completedContainer(getRMContainer(containerId),
-            completedContainer, RMContainerEventType.FINISHED);
-      }
-
-      // If the node is decommissioning, send an update to have the total
-      // resource equal to the used resource, so no available resource to
-      // schedule.
-      if (nm.getState() == NodeState.DECOMMISSIONING) {
-        this.rmContext.getDispatcher().getEventHandler().handle(
-            new RMNodeResourceUpdateEvent(nm.getNodeID(), ResourceOption
-                .newInstance(
-                    getSchedulerNode(nm.getNodeID()).getAllocatedResource(),
-                    0)));
-      }
-
-      if (continuousSchedulingEnabled) {
-        if (!completedContainers.isEmpty()) {
-          attemptScheduling(node);
-        }
-      } else{
-        attemptScheduling(node);
-      }
-
-      // Updating node resource utilization
-      node.setAggregatedContainersUtilization(
-          nm.getAggregatedContainersUtilization());
-      node.setNodeUtilization(nm.getNodeUtilization());
+      FSSchedulerNode fsNode = getFSSchedulerNode(nm.getNodeID());
+      attemptScheduling(fsNode);
 
       long duration = getClock().getTime() - start;
       fsOpDurations.addNodeUpdateDuration(duration);
@@ -1116,10 +1008,15 @@ public class FairScheduler extends
     }
   }
 
+  @Deprecated
   void continuousSchedulingAttempt() throws InterruptedException {
     long start = getClock().getTime();
-    List<FSSchedulerNode> nodeIdList =
-        nodeTracker.sortedNodeList(nodeAvailableResourceComparator);
+    List<FSSchedulerNode> nodeIdList;
+    // Hold a lock to prevent comparator order changes due to changes of node
+    // unallocated resources
+    synchronized (this) {
+      nodeIdList = nodeTracker.sortedNodeList(nodeAvailableResourceComparator);
+    }
 
     // iterate all nodes
     for (FSSchedulerNode node : nodeIdList) {
@@ -1173,16 +1070,38 @@ public class FairScheduler extends
     }
   }
 
+  /**
+   * Assign preempted containers to the applications that have reserved
+   * resources for preempted containers.
+   * @param node Node to check
+   */
+  static void assignPreemptedContainers(FSSchedulerNode node) {
+    for (Entry<FSAppAttempt, Resource> entry :
+        node.getPreemptionList().entrySet()) {
+      FSAppAttempt app = entry.getKey();
+      Resource preemptionPending = Resources.clone(entry.getValue());
+      while (!app.isStopped() && !Resources.isNone(preemptionPending)) {
+        Resource assigned = app.assignContainer(node);
+        if (Resources.isNone(assigned) ||
+            assigned.equals(FairScheduler.CONTAINER_RESERVED)) {
+          // Fail to assign, let's not try further
+          break;
+        }
+        Resources.subtractFromNonNegative(preemptionPending, assigned);
+      }
+    }
+  }
+
   @VisibleForTesting
   void attemptScheduling(FSSchedulerNode node) {
+    writeLock.lock();
     try {
-      writeLock.lock();
       if (rmContext.isWorkPreservingRecoveryEnabled() && !rmContext
           .isSchedulerReadyForAllocatingContainers()) {
         return;
       }
 
-      final NodeId nodeID = node.getNodeID();
+      final NodeId nodeID = (node != null ? node.getNodeID() : null);
       if (!nodeTracker.exists(nodeID)) {
         // The node might have just been removed while this thread was waiting
         // on the synchronized lock before it entered this synchronized method
@@ -1192,11 +1111,17 @@ public class FairScheduler extends
       }
 
       // Assign new containers...
-      // 1. Check for reserved applications
-      // 2. Schedule if there are no reservations
+      // 1. Ensure containers are assigned to the apps that preempted
+      // 2. Check for reserved applications
+      // 3. Schedule if there are no reservations
 
-      boolean validReservation = false;
+      // Apps may wait for preempted containers
+      // We have to satisfy these first to avoid cases, when we preempt
+      // a container for A from B and C gets the preempted containers,
+      // when C does not qualify for preemption itself.
+      assignPreemptedContainers(node);
       FSAppAttempt reservedAppSchedulable = node.getReservedAppSchedulable();
+      boolean validReservation = false;
       if (reservedAppSchedulable != null) {
         validReservation = reservedAppSchedulable.assignReservedContainer(node);
       }
@@ -1206,17 +1131,19 @@ public class FairScheduler extends
         Resource assignedResource = Resources.clone(Resources.none());
         Resource maxResourcesToAssign = Resources.multiply(
             node.getUnallocatedResource(), 0.5f);
+
         while (node.getReservedContainer() == null) {
-          boolean assignedContainer = false;
           Resource assignment = queueMgr.getRootQueue().assignContainer(node);
-          if (!assignment.equals(Resources.none())) {
-            assignedContainers++;
-            assignedContainer = true;
-            Resources.addTo(assignedResource, assignment);
-          }
-          if (!assignedContainer) {
+
+          if (assignment.equals(Resources.none())) {
+            if (LOG.isDebugEnabled()) {
+              LOG.debug("No container is allocated on node " + node);
+            }
             break;
           }
+
+          assignedContainers++;
+          Resources.addTo(assignedResource, assignment);
           if (!shouldContinueAssigning(assignedContainers, maxResourcesToAssign,
               assignedResource)) {
             break;
@@ -1257,12 +1184,12 @@ public class FairScheduler extends
    * @return true if preemption should be attempted, false otherwise.
    */
   private boolean shouldAttemptPreemption() {
-    if (preemptionEnabled) {
-      Resource clusterResource = getClusterResource();
-      return (preemptionUtilizationThreshold < Math.max(
-          (float) rootMetrics.getAllocatedMB() / clusterResource.getMemorySize(),
+    if (context.isPreemptionEnabled()) {
+      return (context.getPreemptionUtilizationThreshold() < Math.max(
+          (float) rootMetrics.getAllocatedMB() /
+              getClusterResource().getMemorySize(),
           (float) rootMetrics.getAllocatedVirtualCores() /
-              clusterResource.getVirtualCores()));
+              getClusterResource().getVirtualCores()));
     }
     return false;
   }
@@ -1351,6 +1278,17 @@ public class FairScheduler extends
           appAttemptRemovedEvent.getFinalAttemptState(),
           appAttemptRemovedEvent.getKeepContainersAcrossAppAttempts());
       break;
+    case RELEASE_CONTAINER:
+      if (!(event instanceof ReleaseContainerEvent)) {
+        throw new RuntimeException("Unexpected event type: " + event);
+      }
+      RMContainer container = ((ReleaseContainerEvent) event).getContainer();
+      completedContainer(container,
+          SchedulerUtils.createAbnormalContainerStatus(
+              container.getContainerId(),
+              SchedulerUtils.RELEASED_CONTAINER),
+          RMContainerEventType.RELEASED);
+      break;
     case CONTAINER_EXPIRED:
       if (!(event instanceof ContainerExpiredSchedulerEvent)) {
         throw new RuntimeException("Unexpected event type: " + event);
@@ -1372,8 +1310,8 @@ public class FairScheduler extends
   private String resolveReservationQueueName(String queueName,
       ApplicationId applicationId, ReservationId reservationID,
       boolean isRecovering) {
+    readLock.lock();
     try {
-      readLock.lock();
       FSQueue queue = queueMgr.getQueue(queueName);
       if ((queue == null) || !allocConf.isReservable(queue.getQueueName())) {
         return queueName;
@@ -1392,9 +1330,7 @@ public class FairScheduler extends
           String message = "Application " + applicationId
               + " submitted to a reservation which is not yet "
               + "currently active: " + resQName;
-          this.rmContext.getDispatcher().getEventHandler().handle(
-              new RMAppEvent(applicationId, RMAppEventType.APP_REJECTED,
-                  message));
+          rejectApplicationWithMessage(applicationId, message);
           return null;
         }
         if (!queue.getParent().getQueueName().equals(queueName)) {
@@ -1402,9 +1338,7 @@ public class FairScheduler extends
               "Application: " + applicationId + " submitted to a reservation "
                   + resQName + " which does not belong to the specified queue: "
                   + queueName;
-          this.rmContext.getDispatcher().getEventHandler().handle(
-              new RMAppEvent(applicationId, RMAppEventType.APP_REJECTED,
-                  message));
+          rejectApplicationWithMessage(applicationId, message);
           return null;
         }
         // use the reservation queue to run the app
@@ -1417,7 +1351,13 @@ public class FairScheduler extends
     } finally {
       readLock.unlock();
     }
+  }
 
+  private void rejectApplicationWithMessage(ApplicationId applicationId,
+          String msg) {
+    LOG.info(msg);
+    rmContext.getDispatcher().getEventHandler().handle(new RMAppEvent(
+            applicationId, RMAppEventType.APP_REJECTED, msg));
   }
 
   private String getDefaultQueueForPlanQueue(String queueName) {
@@ -1435,13 +1375,15 @@ public class FairScheduler extends
     this.rmContext = rmContext;
   }
 
+  @SuppressWarnings("deprecation")
   private void initScheduler(Configuration conf) throws IOException {
+    writeLock.lock();
     try {
-      writeLock.lock();
       this.conf = new FairSchedulerConfiguration(conf);
       validateConf(this.conf);
-      minimumAllocation = this.conf.getMinimumAllocation();
-      initMaximumResourceCapability(this.conf.getMaximumAllocation());
+      authorizer = YarnAuthorizationProvider.getInstance(conf);
+      minimumAllocation = super.getMinimumAllocation();
+      initMaximumResourceCapability(super.getMaximumAllocation());
       incrAllocation = this.conf.getIncrementAllocation();
       updateReservationThreshold();
       continuousSchedulingEnabled = this.conf.isContinuousSchedulingEnabled();
@@ -1450,15 +1392,10 @@ public class FairScheduler extends
       rackLocalityThreshold = this.conf.getLocalityThresholdRack();
       nodeLocalityDelayMs = this.conf.getLocalityDelayNodeMs();
       rackLocalityDelayMs = this.conf.getLocalityDelayRackMs();
-      preemptionEnabled = this.conf.getPreemptionEnabled();
-      preemptionUtilizationThreshold =
-          this.conf.getPreemptionUtilizationThreshold();
       assignMultiple = this.conf.getAssignMultiple();
       maxAssignDynamic = this.conf.isMaxAssignDynamic();
       maxAssign = this.conf.getMaxAssign();
       sizeBasedWeight = this.conf.getSizeBasedWeight();
-      preemptionInterval = this.conf.getPreemptionInterval();
-      waitTimeBeforeKill = this.conf.getWaitTimeBeforeKill();
       usePortForNodeName = this.conf.getUsePortForNodeName();
       reservableNodesRatio = this.conf.getReservableNodes();
 
@@ -1467,7 +1404,7 @@ public class FairScheduler extends
         updateInterval = FairSchedulerConfiguration.DEFAULT_UPDATE_INTERVAL_MS;
         LOG.warn(FairSchedulerConfiguration.UPDATE_INTERVAL_MS
             + " is invalid, so using default value "
-            + +FairSchedulerConfiguration.DEFAULT_UPDATE_INTERVAL_MS
+            + FairSchedulerConfiguration.DEFAULT_UPDATE_INTERVAL_MS
             + " ms instead");
       }
 
@@ -1476,8 +1413,6 @@ public class FairScheduler extends
 
       // This stores per-application scheduling information
       this.applications = new ConcurrentHashMap<>();
-      this.eventLog = new FairSchedulerEventLog();
-      eventLog.init(this.conf);
 
       allocConf = new AllocationConfiguration(conf);
       try {
@@ -1486,15 +1421,21 @@ public class FairScheduler extends
         throw new IOException("Failed to start FairScheduler", e);
       }
 
-      updateThread = new UpdateThread();
-      updateThread.setName("FairSchedulerUpdateThread");
-      updateThread.setDaemon(true);
-
       if (continuousSchedulingEnabled) {
+        // Continuous scheduling is deprecated log it on startup
+        LOG.warn("Continuous scheduling is turned ON. It is deprecated " +
+            "because it can cause scheduler slowness due to locking issues. " +
+            "Schedulers should use assignmultiple as a replacement.");
         // start continuous scheduling thread
         schedulingThread = new ContinuousSchedulingThread();
         schedulingThread.setName("FairSchedulerContinuousScheduling");
+        schedulingThread.setUncaughtExceptionHandler(
+            new RMCriticalThreadUncaughtExceptionHandler(rmContext));
         schedulingThread.setDaemon(true);
+      }
+
+      if (this.conf.getPreemptionEnabled()) {
+        createPreemptionThread();
       }
     } finally {
       writeLock.unlock();
@@ -1512,6 +1453,13 @@ public class FairScheduler extends
     }
   }
 
+  @VisibleForTesting
+  protected void createPreemptionThread() {
+    preemptionThread = new FSPreemptionThread(this);
+    preemptionThread.setUncaughtExceptionHandler(
+        new RMCriticalThreadUncaughtExceptionHandler(rmContext));
+  }
+
   private void updateReservationThreshold() {
     Resource newThreshold = Resources.multiply(
         getIncrementResourceCapability(),
@@ -1521,15 +1469,16 @@ public class FairScheduler extends
   }
 
   private void startSchedulerThreads() {
+    writeLock.lock();
     try {
-      writeLock.lock();
-      Preconditions.checkNotNull(updateThread, "updateThread is null");
       Preconditions.checkNotNull(allocsLoader, "allocsLoader is null");
-      updateThread.start();
       if (continuousSchedulingEnabled) {
         Preconditions.checkNotNull(schedulingThread,
             "schedulingThread is null");
         schedulingThread.start();
+      }
+      if (preemptionThread != null) {
+        preemptionThread.start();
       }
       allocsLoader.start();
     } finally {
@@ -1541,6 +1490,9 @@ public class FairScheduler extends
   public void serviceInit(Configuration conf) throws Exception {
     initScheduler(conf);
     super.serviceInit(conf);
+
+    // Initialize SchedulingMonitorManager
+    schedulingMonitorManager.initialize(rmContext, conf);
   }
 
   @Override
@@ -1549,19 +1501,20 @@ public class FairScheduler extends
     super.serviceStart();
   }
 
+  @SuppressWarnings("deprecation")
   @Override
   public void serviceStop() throws Exception {
+    writeLock.lock();
     try {
-      writeLock.lock();
-      if (updateThread != null) {
-        updateThread.interrupt();
-        updateThread.join(THREAD_JOIN_TIMEOUT_MS);
-      }
       if (continuousSchedulingEnabled) {
         if (schedulingThread != null) {
           schedulingThread.interrupt();
           schedulingThread.join(THREAD_JOIN_TIMEOUT_MS);
         }
+      }
+      if (preemptionThread != null) {
+        preemptionThread.interrupt();
+        preemptionThread.join(THREAD_JOIN_TIMEOUT_MS);
       }
       if (allocsLoader != null) {
         allocsLoader.stop();
@@ -1578,8 +1531,15 @@ public class FairScheduler extends
       throws IOException {
     try {
       allocsLoader.reloadAllocations();
+      super.reinitialize(conf, rmContext);
     } catch (Exception e) {
       LOG.error("Failed to reload allocations file", e);
+    }
+    try {
+      refreshMaximumAllocation(
+          ResourceUtils.fetchMaximumAllocationFromConfig(conf));
+    } catch (Exception e) {
+      LOG.error("Failed to refresh maximum allocation", e);
     }
   }
 
@@ -1613,8 +1573,8 @@ public class FairScheduler extends
   @Override
   public boolean checkAccess(UserGroupInformation callerUGI,
       QueueACL acl, String queueName) {
+    readLock.lock();
     try {
-      readLock.lock();
       FSQueue queue = getQueueManager().getQueue(queueName);
       if (queue == null) {
         if (LOG.isDebugEnabled()) {
@@ -1637,21 +1597,66 @@ public class FairScheduler extends
       AllocationFileLoaderService.Listener {
 
     @Override
-    public void onReload(AllocationConfiguration queueInfo) {
+    public void onReload(AllocationConfiguration queueInfo)
+        throws IOException {
       // Commit the reload; also create any queue defined in the alloc file
       // if it does not already exist, so it can be displayed on the web UI.
 
+      Set<String> removedStaticQueues = getRemovedStaticQueues(queueInfo);
       writeLock.lock();
       try {
-        allocConf = queueInfo;
-        allocConf.getDefaultSchedulingPolicy().initialize(getClusterResource());
-        queueMgr.updateAllocationConfiguration(allocConf);
-        applyChildDefaults();
-        maxRunningEnforcer.updateRunnabilityOnReload();
+        if (queueInfo == null) {
+          authorizer.setPermission(allocsLoader.getDefaultPermissions(),
+              UserGroupInformation.getCurrentUser());
+        } else {
+          allocConf = queueInfo;
+          setQueueAcls(allocConf.getQueueAcls());
+          allocConf.getDefaultSchedulingPolicy().initialize(getContext());
+          queueMgr.updateAllocationConfiguration(allocConf);
+          queueMgr.setQueuesToDynamic(removedStaticQueues);
+          applyChildDefaults();
+          maxRunningEnforcer.updateRunnabilityOnReload();
+        }
       } finally {
         writeLock.unlock();
       }
     }
+
+    private Set<String> getRemovedStaticQueues(
+        AllocationConfiguration queueInfo) {
+      if (queueInfo == null || allocConf == null) {
+        return Collections.emptySet();
+      }
+      Set<String> removedStaticQueues = new HashSet<>();
+      for (Set<String> queues : allocConf.getConfiguredQueues().values()) {
+        removedStaticQueues.addAll(queues);
+      }
+      for (Set<String> queues : queueInfo.getConfiguredQueues().values()) {
+        removedStaticQueues.removeAll(queues);
+      }
+      return removedStaticQueues;
+    }
+
+    @Override
+    public void onCheck() {
+      queueMgr.removeEmptyDynamicQueues();
+      queueMgr.removePendingIncompatibleQueues();
+    }
+  }
+
+  private void setQueueAcls(
+      Map<String, Map<AccessType, AccessControlList>> queueAcls)
+      throws IOException {
+    authorizer.setPermission(allocsLoader.getDefaultPermissions(),
+        UserGroupInformation.getCurrentUser());
+    List<Permission> permissions = new ArrayList<>();
+    for (Entry<String, Map<AccessType, AccessControlList>> queueAcl : queueAcls
+        .entrySet()) {
+      permissions.add(new Permission(new PrivilegedEntity(EntityType.QUEUE,
+          queueAcl.getKey()), queueAcl.getValue()));
+    }
+    authorizer.setPermission(permissions,
+        UserGroupInformation.getCurrentUser());
   }
 
   /**
@@ -1673,7 +1678,8 @@ public class FairScheduler extends
       if ((queue.getParent() != null) &&
           !configuredLeafQueues.contains(queue.getName()) &&
           !configuredParentQueues.contains(queue.getName())) {
-        Resource max = queue.getParent().getMaxChildQueueResource();
+        ConfigurableResource max = queue.getParent().
+            getMaxChildQueueResource();
 
         if (max != null) {
           queue.setMaxShare(max);
@@ -1696,8 +1702,8 @@ public class FairScheduler extends
   @Override
   public String moveApplication(ApplicationId appId,
       String queueName) throws YarnException {
+    writeLock.lock();
     try {
-      writeLock.lock();
       SchedulerApplication<FSAppAttempt> app = applications.get(appId);
       if (app == null) {
         throw new YarnException("App to be moved " + appId + " not found.");
@@ -1705,9 +1711,16 @@ public class FairScheduler extends
       FSAppAttempt attempt = (FSAppAttempt) app.getCurrentAppAttempt();
       // To serialize with FairScheduler#allocate, synchronize on app attempt
 
+      attempt.getWriteLock().lock();
       try {
-        attempt.getWriteLock().lock();
         FSLeafQueue oldQueue = (FSLeafQueue) app.getQueue();
+        // Check if the attempt is already stopped: don't move stopped app
+        // attempt. The attempt has already been removed from all queues.
+        if (attempt.isStopped()) {
+          LOG.info("Application " + appId + " is stopped and can't be moved!");
+          throw new YarnException("Application " + appId
+              + " is stopped and can't be moved!");
+        }
         String destQueueName = handleMoveToPlanQueue(queueName);
         FSLeafQueue targetQueue = queueMgr.getLeafQueue(destQueueName, false);
         if (targetQueue == null) {
@@ -1731,7 +1744,41 @@ public class FairScheduler extends
       writeLock.unlock();
     }
   }
-  
+
+  @Override
+  public void preValidateMoveApplication(ApplicationId appId, String newQueue)
+      throws YarnException {
+    writeLock.lock();
+    try {
+      SchedulerApplication<FSAppAttempt> app = applications.get(appId);
+      if (app == null) {
+        throw new YarnException("App to be moved " + appId + " not found.");
+      }
+
+      FSAppAttempt attempt = app.getCurrentAppAttempt();
+      // To serialize with FairScheduler#allocate, synchronize on app attempt
+
+      attempt.getWriteLock().lock();
+      try {
+        FSLeafQueue oldQueue = (FSLeafQueue) app.getQueue();
+        String destQueueName = handleMoveToPlanQueue(newQueue);
+        FSLeafQueue targetQueue = queueMgr.getLeafQueue(destQueueName, false);
+        if (targetQueue == null) {
+          throw new YarnException("Target queue " + newQueue
+              + " not found or is not a leaf queue.");
+        }
+
+        if (oldQueue.isRunnableApp(attempt)) {
+          verifyMoveDoesNotViolateConstraints(attempt, oldQueue, targetQueue);
+        }
+      } finally {
+        attempt.getWriteLock().unlock();
+      }
+    } finally {
+      writeLock.unlock();
+    }
+  }
+
   private void verifyMoveDoesNotViolateConstraints(FSAppAttempt app,
       FSLeafQueue oldQueue, FSLeafQueue targetQueue) throws YarnException {
     String queueName = targetQueue.getQueueName();
@@ -1770,16 +1817,23 @@ public class FairScheduler extends
    * operations will be atomic.
    */
   private void executeMove(SchedulerApplication<FSAppAttempt> app,
-      FSAppAttempt attempt, FSLeafQueue oldQueue, FSLeafQueue newQueue) {
-    boolean wasRunnable = oldQueue.removeApp(attempt);
+      FSAppAttempt attempt, FSLeafQueue oldQueue, FSLeafQueue newQueue)
+      throws YarnException {
+    // Check current runs state. Do not remove the attempt from the queue until
+    // after the check has been performed otherwise it could remove the app
+    // from a queue without moving it to a new queue.
+    boolean wasRunnable = oldQueue.isRunnableApp(attempt);
     // if app was not runnable before, it may be runnable now
     boolean nowRunnable = maxRunningEnforcer.canAppBeRunnable(newQueue,
-        attempt.getUser());
+        attempt);
     if (wasRunnable && !nowRunnable) {
-      throw new IllegalStateException("Should have already verified that app "
+      throw new YarnException("Should have already verified that app "
           + attempt.getApplicationId() + " would be runnable in new queue");
     }
-    
+
+    // Now it is safe to remove from the queue.
+    oldQueue.removeApp(attempt);
+
     if (wasRunnable) {
       maxRunningEnforcer.untrackRunnableApp(attempt);
     } else if (nowRunnable) {
@@ -1826,8 +1880,8 @@ public class FairScheduler extends
   @Override
   public void updateNodeResource(RMNode nm,
       ResourceOption resourceOption) {
+    writeLock.lock();
     try {
-      writeLock.lock();
       super.updateNodeResource(nm, resourceOption);
       updateRootQueueMetrics();
       queueMgr.getRootQueue().setSteadyFairShare(getClusterResource());
@@ -1897,14 +1951,21 @@ public class FairScheduler extends
     return targetQueueName;
   }
 
-  @Override
-  protected void decreaseContainer(
-      SchedContainerChangeRequest decreaseRequest,
-      SchedulerApplicationAttempt attempt) {
-    // TODO Auto-generated method stub    
-  }
-
   public float getReservableNodesRatio() {
     return reservableNodesRatio;
+  }
+
+  long getNMHeartbeatInterval() {
+    return nmHeartbeatInterval;
+  }
+
+  ReadLock getSchedulerReadLock() {
+    return this.readLock;
+  }
+
+  @Override
+  public long checkAndGetApplicationLifetime(String queueName, long lifetime) {
+    // Lifetime is the application lifetime by default.
+    return lifetime;
   }
 }

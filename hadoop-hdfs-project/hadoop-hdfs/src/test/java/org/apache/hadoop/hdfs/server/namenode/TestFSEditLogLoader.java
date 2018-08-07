@@ -47,8 +47,10 @@ import org.apache.hadoop.hdfs.DistributedFileSystem;
 import org.apache.hadoop.hdfs.HdfsConfiguration;
 import org.apache.hadoop.hdfs.MiniDFSCluster;
 import org.apache.hadoop.hdfs.StripedFileTestUtil;
+import org.apache.hadoop.hdfs.protocol.AddErasureCodingPolicyResponse;
 import org.apache.hadoop.hdfs.protocol.Block;
 import org.apache.hadoop.hdfs.protocol.ErasureCodingPolicy;
+import org.apache.hadoop.hdfs.protocol.ErasureCodingPolicyState;
 import org.apache.hadoop.hdfs.server.blockmanagement.BlockInfo;
 import org.apache.hadoop.hdfs.server.blockmanagement.BlockInfoContiguous;
 import org.apache.hadoop.hdfs.server.blockmanagement.BlockInfoStriped;
@@ -57,6 +59,7 @@ import org.apache.hadoop.hdfs.server.common.Storage.StorageDirectory;
 import org.apache.hadoop.hdfs.server.namenode.FSEditLogLoader.EditLogValidation;
 import org.apache.hadoop.hdfs.server.namenode.NNStorage.NameNodeDirType;
 import org.apache.hadoop.io.IOUtils;
+import org.apache.hadoop.io.erasurecode.ECSchema;
 import org.apache.hadoop.test.GenericTestUtils;
 import org.apache.hadoop.test.PathUtils;
 import org.apache.log4j.Level;
@@ -99,8 +102,8 @@ public class TestFSEditLogLoader {
 
   private static final int NUM_DATA_NODES = 0;
 
-  private static final ErasureCodingPolicy testECPolicy
-      = StripedFileTestUtil.TEST_EC_POLICY;
+  private final ErasureCodingPolicy testECPolicy
+      = StripedFileTestUtil.getDefaultECPolicy();
 
   @Test
   public void testDisplayRecentEditLogOpCodes() throws IOException {
@@ -157,7 +160,7 @@ public class TestFSEditLogLoader {
     // start a cluster 
     Configuration conf = getConf();
     // Replicate and heartbeat fast to shave a few seconds off test
-    conf.setInt(DFSConfigKeys.DFS_NAMENODE_REPLICATION_INTERVAL_KEY, 1);
+    conf.setInt(DFSConfigKeys.DFS_NAMENODE_REDUNDANCY_INTERVAL_SECONDS_KEY, 1);
     conf.setInt(DFSConfigKeys.DFS_HEARTBEAT_INTERVAL_KEY, 1);
 
     MiniDFSCluster cluster = null;
@@ -465,6 +468,7 @@ public class TestFSEditLogLoader {
       cluster.waitActive();
       DistributedFileSystem fs = cluster.getFileSystem();
       FSNamesystem fns = cluster.getNamesystem();
+      fs.enableErasureCodingPolicy(testECPolicy.getName());
 
       String testDir = "/ec";
       String testFile = "testfile_001";
@@ -474,13 +478,13 @@ public class TestFSEditLogLoader {
       long blkId = 1;
       long blkNumBytes = 1024;
       long timestamp = 1426222918;
-      short blockNum = StripedFileTestUtil.NUM_DATA_BLOCKS;
-      short parityNum = StripedFileTestUtil.NUM_PARITY_BLOCKS;
+      short blockNum = (short) testECPolicy.getNumDataUnits();
+      short parityNum = (short) testECPolicy.getNumParityUnits();
 
       //set the storage policy of the directory
       fs.mkdir(new Path(testDir), new FsPermission("755"));
       fs.getClient().getNamenode().setErasureCodingPolicy(
-          testDir, testECPolicy);
+          testDir, testECPolicy.getName());
 
       // Create a file with striped block
       Path p = new Path(testFilePath);
@@ -538,6 +542,7 @@ public class TestFSEditLogLoader {
       cluster.waitActive();
       DistributedFileSystem fs = cluster.getFileSystem();
       FSNamesystem fns = cluster.getNamesystem();
+      fs.enableErasureCodingPolicy(testECPolicy.getName());
 
       String testDir = "/ec";
       String testFile = "testfile_002";
@@ -547,13 +552,13 @@ public class TestFSEditLogLoader {
       long blkId = 1;
       long blkNumBytes = 1024;
       long timestamp = 1426222918;
-      short blockNum = StripedFileTestUtil.NUM_DATA_BLOCKS;
-      short parityNum = StripedFileTestUtil.NUM_PARITY_BLOCKS;
+      short blockNum = (short) testECPolicy.getNumDataUnits();
+      short parityNum = (short) testECPolicy.getNumParityUnits();
 
       //set the storage policy of the directory
       fs.mkdir(new Path(testDir), new FsPermission("755"));
       fs.getClient().getNamenode().setErasureCodingPolicy(
-          testDir, testECPolicy);
+          testDir, testECPolicy.getName());
 
       //create a file with striped blocks
       Path p = new Path(testFilePath);
@@ -701,6 +706,90 @@ public class TestFSEditLogLoader {
       cluster.waitActive();
       fns = cluster.getNamesystem();
       assertTrue(fns.getBlockManager().hasNonEcBlockUsingStripedID());
+
+      cluster.shutdown();
+      cluster = null;
+    } finally {
+      if (cluster != null) {
+        cluster.shutdown();
+      }
+    }
+  }
+
+  @Test
+  public void testErasureCodingPolicyOperations() throws IOException {
+    // start a cluster
+    Configuration conf = new HdfsConfiguration();
+    final int blockSize = 16 * 1024;
+    conf.setLong(DFSConfigKeys.DFS_BLOCK_SIZE_KEY, blockSize);
+    MiniDFSCluster cluster = null;
+    try {
+      cluster = new MiniDFSCluster.Builder(conf).numDataNodes(9)
+          .build();
+      cluster.waitActive();
+      DistributedFileSystem fs = cluster.getFileSystem();
+
+      // 1. add new policy
+      ECSchema schema = new ECSchema("rs", 5, 3);
+      int cellSize = 2 * 1024;
+      ErasureCodingPolicy newPolicy =
+          new ErasureCodingPolicy(schema, cellSize, (byte) 0);
+      ErasureCodingPolicy[] policyArray = new ErasureCodingPolicy[]{newPolicy};
+      AddErasureCodingPolicyResponse[] responses =
+          fs.addErasureCodingPolicies(policyArray);
+      assertEquals(1, responses.length);
+      assertTrue(responses[0].isSucceed());
+      newPolicy = responses[0].getPolicy();
+
+      // Restart NameNode without saving namespace
+      cluster.restartNameNodes();
+      cluster.waitActive();
+
+      // check if new policy is reapplied through edit log
+      ErasureCodingPolicy ecPolicy =
+          ErasureCodingPolicyManager.getInstance().getByID(newPolicy.getId());
+      assertEquals(ErasureCodingPolicyState.DISABLED,
+          DFSTestUtil.getECPolicyState(ecPolicy));
+
+      // 2. enable policy
+      fs.enableErasureCodingPolicy(newPolicy.getName());
+      cluster.restartNameNodes();
+      cluster.waitActive();
+      ecPolicy =
+          ErasureCodingPolicyManager.getInstance().getByID(newPolicy.getId());
+      assertEquals(ErasureCodingPolicyState.ENABLED,
+          DFSTestUtil.getECPolicyState(ecPolicy));
+
+      // create a new file, use the policy
+      final Path dirPath = new Path("/striped");
+      final Path filePath = new Path(dirPath, "file");
+      final int fileLength = blockSize * newPolicy.getNumDataUnits();
+      fs.mkdirs(dirPath);
+      fs.setErasureCodingPolicy(dirPath, newPolicy.getName());
+      final byte[] bytes = StripedFileTestUtil.generateBytes(fileLength);
+      DFSTestUtil.writeFile(fs, filePath, bytes);
+
+      // 3. disable policy
+      fs.disableErasureCodingPolicy(newPolicy.getName());
+      cluster.restartNameNodes();
+      cluster.waitActive();
+      ecPolicy =
+          ErasureCodingPolicyManager.getInstance().getByID(newPolicy.getId());
+      assertEquals(ErasureCodingPolicyState.DISABLED,
+          DFSTestUtil.getECPolicyState(ecPolicy));
+      // read file
+      DFSTestUtil.readFileAsBytes(fs, filePath);
+
+      // 4. remove policy
+      fs.removeErasureCodingPolicy(newPolicy.getName());
+      cluster.restartNameNodes();
+      cluster.waitActive();
+      ecPolicy =
+          ErasureCodingPolicyManager.getInstance().getByID(newPolicy.getId());
+      assertEquals(ErasureCodingPolicyState.REMOVED,
+          DFSTestUtil.getECPolicyState(ecPolicy));
+      // read file
+      DFSTestUtil.readFileAsBytes(fs, filePath);
 
       cluster.shutdown();
       cluster = null;
